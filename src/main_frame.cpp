@@ -100,7 +100,7 @@ private:
 }  // namespace
 
 MainFrame::MainFrame(Store& store)
-    : wxFrame(nullptr, wxID_ANY, "LOKI Sync", wxDefaultPosition, wxSize(820, 560)), store_(store), timer_(this) {
+    : wxFrame(nullptr, wxID_ANY, "LOKI Sync", wxDefaultPosition, wxSize(820, 560)), store_(store), timer_(this), settle_(this) {
     SetIcon(tree_icon(32));
     SetMinSize(FromDIP(wxSize(640, 420)));
     book_ = new wxSimplebook(this);
@@ -123,13 +123,22 @@ MainFrame::MainFrame(Store& store)
         }
         Destroy();
     });
+    // Both timers sync: the slow fallback, and the one that waits for local writes to settle.
     Bind(wxEVT_TIMER, [this](wxTimerEvent&) { SyncNow(); });
-    timer_.Start(60 * 1000);
+    timer_.Start(5 * 60 * 1000);
+    Bind(wxEVT_FSWATCHER, [this](wxFileSystemWatcherEvent& e) {
+        if (e.GetChangeType() & (wxFSW_EVENT_ACCESS | wxFSW_EVENT_WARNING | wxFSW_EVENT_ERROR)) return;
+        if (e.GetPath().GetFullName().StartsWith(".loki")) return;
+        settle_.StartOnce(int(Engine::settle_ms) + 500);
+    });
 
     if (store_.signed_in()) {
         book_->SetSelection(1);
         Refresh();
         SyncNow();
+        StartWatching();
+        // The file watcher needs a running event loop.
+        CallAfter([this] { WatchFolders(); });
     } else {
         book_->SetSelection(0);
         server_->SetValue(W(store_.server()));
@@ -140,7 +149,9 @@ MainFrame::MainFrame(Store& store)
 MainFrame::~MainFrame() {
     *alive_ = false;
     if (pairing_alive_) *pairing_alive_ = false;
+    StopWatching();
     timer_.Stop();
+    settle_.Stop();
     if (tray_) tray_->RemoveIcon();
 }
 
@@ -367,6 +378,53 @@ void MainFrame::FinishSignIn(const std::string& server, const Session& session) 
     pairing_panel_->Hide();
     book_->SetSelection(1);
     Refresh();
+    StartWatching();
+    WatchFolders();
+}
+
+// ---- Noticing changes -------------------------------------------------------
+
+void MainFrame::StartWatching() {
+    StopWatching();
+    if (!store_.signed_in()) return;
+    auto active = watching_ = std::make_shared<std::atomic<bool>>(true);
+    std::thread([this, active, alive = alive_, api = store_.api()]() mutable {
+        std::string state;
+        while (*active && *alive) {
+            try {
+                const bool first = state.empty();
+                const auto result = api.watch(state, 60);
+                state = result.state;
+                // The first answer only learns the state; the startup sync covered it.
+                if (result.changed && !first && *active && *alive) {
+                    CallAfter([this, active, alive] {
+                        if (*active && *alive) SyncNow();
+                    });
+                }
+            } catch (const std::exception&) {
+                // Offline or signed out: try again shortly.
+                for (int i = 0; i < 15 && *active && *alive; ++i) std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+        }
+    }).detach();
+}
+
+void MainFrame::StopWatching() {
+    if (watching_) *watching_ = false;
+    watching_.reset();
+}
+
+void MainFrame::WatchFolders() {
+    if (!files_) {
+        files_ = std::make_unique<wxFileSystemWatcher>();
+        files_->SetOwner(this);
+    }
+    files_->RemoveAll();
+    for (const auto& [id, mapping] : store_.mappings()) {
+        if (std::filesystem::is_directory(mapping.local)) {
+            files_->AddTree(wxFileName::DirName(wxString(mapping.local.wstring())), wxFSW_EVENT_ALL);
+        }
+    }
 }
 
 // ---- Folders ----------------------------------------------------------------
@@ -490,6 +548,7 @@ void MainFrame::OnChooseLocal() {
     const std::filesystem::path chosen = dialog.GetPath().ToStdWstring();
     if (current && current->local != chosen) store_.remove_mapping(*id);  // A new place starts a fresh index.
     store_.save_mapping({*id, chosen});
+    WatchFolders();
     Populate();
     SyncNow();
 }
@@ -497,6 +556,7 @@ void MainFrame::OnChooseLocal() {
 void MainFrame::OnStop() {
     if (const auto id = SelectedFolder()) {
         store_.remove_mapping(*id);
+        WatchFolders();
         Populate();
     }
 }
@@ -525,7 +585,9 @@ void MainFrame::OnSignOut() {
     }
     auto api = std::make_shared<Api>(store_.api());
     Background([api] { api->sign_out(); }, [](std::optional<std::string>) {});
+    StopWatching();
     store_.sign_out();
+    if (files_) files_->RemoveAll();
     folders_.clear();
     list_->DeleteAllItems();
     discovered_.reset();
@@ -534,7 +596,12 @@ void MainFrame::OnSignOut() {
 }
 
 void MainFrame::SyncNow() {
-    if (!store_.signed_in() || syncing_.exchange(true)) return;
+    if (!store_.signed_in()) return;
+    if (syncing_.exchange(true)) {
+        rerun_ = true;
+        return;
+    }
+    rerun_ = false;
     status_->SetLabel("Syncing…");
     if (tray_) tray_->SetIcon(tree_icon(32), "LOKI Sync — syncing");
     auto outcomes = std::make_shared<std::map<std::string, Outcome>>();
@@ -549,6 +616,7 @@ void MainFrame::SyncNow() {
                                               : "Last sync " + wxDateTime::Now().FormatTime());
                    if (tray_) tray_->SetIcon(tree_icon(32), "LOKI Sync");
                    Populate();
+                   if (rerun_) CallAfter([this] { SyncNow(); });
                });
 }
 

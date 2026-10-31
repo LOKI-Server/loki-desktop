@@ -49,6 +49,12 @@ struct Feed {
 struct Quota {
     std::int64_t used = 0, limit = 0, max_file_bytes = 0;
 };
+/** Every folder's sequence number, and a token that changes whenever any does. */
+struct Watch {
+    std::string state;
+    bool changed = false;
+    std::vector<std::pair<std::string, std::int64_t>> folders;
+};
 
 /** One change sent in a commit. An empty hash deletes the path. */
 struct LocalChange {
@@ -82,6 +88,8 @@ public:
     std::vector<Folder> folders();
     Folder create_folder(const std::string& name, const std::string& kind);
     Feed changes(const std::string& folder, std::int64_t since, int limit = 1000);
+    /** Waits up to `wait` seconds for any folder to differ from `state` (empty: answer at once). */
+    Watch watch(const std::string& state, int wait);
 
     bool has_blob(const std::string& hash);
     void upload_blob(const std::string& hash, const std::filesystem::path& file);

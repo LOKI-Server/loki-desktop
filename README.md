@@ -16,7 +16,7 @@ with [xmake](https://xmake.io).
    sign in with a password.
 3. Select a server folder and choose **Choose local folder…**.
 
-LOKI Sync syncs every minute and whenever you press **Sync now**. Closing the
+LOKI Sync syncs as soon as anything changes: it holds one request open to the server, which answers the moment another device changes a folder, and watches the mapped folders for local saves (waiting until a file has stopped changing). A 5-minute timer and **Sync now** cover anything else. Closing the
 window keeps it running in the notification area. Start it with `--background`
 to begin hidden there, for example at sign-in.
 

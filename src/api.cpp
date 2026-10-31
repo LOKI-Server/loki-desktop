@@ -212,6 +212,13 @@ Feed Api::changes(const std::string& folder, std::int64_t since, int limit) {
     return feed;
 }
 
+Watch Api::watch(const std::string& state, int wait) {
+    auto o = json::parse(ok("GET", "/sync/v1/watch?wait=" + std::to_string(wait) + "&state=" + escape(state)));
+    Watch result{o.at("state"), o.value("changed", false), {}};
+    for (const auto& f : o.at("folders")) result.folders.emplace_back(f.at("id"), f.at("seq"));
+    return result;
+}
+
 bool Api::has_blob(const std::string& hash) {
     auto r = request("HEAD", "/sync/v1/blobs/" + hash);
     if (r.status == 200) return true;

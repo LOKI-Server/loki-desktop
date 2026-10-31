@@ -2,6 +2,7 @@
 // when LOKI_TEST_SERVER, LOKI_TEST_USER, and LOKI_TEST_PASSWORD are set.
 #include <chrono>
 #include <cstdlib>
+#include <future>
 #include <fstream>
 #include <iostream>
 #include <random>
@@ -135,6 +136,20 @@ static void two_devices(const std::string& server, const std::string& user, cons
     CHECK(sync_b.sync(*b.mapping(folder.id)).removed == 1);
     CHECK(!fs::exists(home_b / "saves/gba/Fusion.srm"));
     CHECK(sync_b.sync(*b.mapping(folder.id)).summary() == "Up to date");
+
+    // A held watch wakes as soon as the other computer commits.
+    auto watcher = a.api();
+    const auto quiet = watcher.watch("", 0);
+    auto woke = std::async(std::launch::async, [&] { return watcher.watch(quiet.state, 30); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    write(home_b / "saves/live.sav", "live");
+    age(home_b / "saves/live.sav");
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(sync_b.sync(*b.mapping(folder.id)).uploaded == 1);
+    const auto watched = woke.get();
+    CHECK(watched.changed && watched.state != quiet.state);
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(10));
+    CHECK(watcher.watch(watched.state, 1).changed == false);
 
     // Files still being written wait for the next pass.
     write(home_a / "saves/busy.sav", "writing");
