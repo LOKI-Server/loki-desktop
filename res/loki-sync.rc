@@ -1,0 +1,2 @@
+// Common controls v6 and DPI awareness for wxWidgets on Windows.
+#include "wx/msw/wx.rc"
