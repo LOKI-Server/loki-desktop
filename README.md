@@ -1,7 +1,7 @@
 # LOKI Sync for desktop
 
 Keeps folders on a Windows, macOS, or Linux computer in step with a
-[LOKI](https://github.com/Aspenini/LOKI) server's **Save sync**. Typical uses:
+[LOKI](https://github.com/LOKI-Server/LOKI) server's **Save sync**. Typical uses:
 RetroArch or other emulator saves shared with a handheld, or PC game saves
 without cloud sync. Every earlier version stays on your server.
 
