@@ -54,6 +54,14 @@ On Windows this uses MSVC and prebuilt wxWidgets. Run it from PowerShell or a
 Developer Command Prompt rather than an MSYS shell, which mangles CMake paths
 while libcurl builds.
 
+On Windows the build copies the wxWidgets runtime DLLs beside
+`build/windows/x64/release/loki-sync.exe` (or the selected architecture and
+mode). You can launch it directly from Explorer. When moving the application
+to another folder, keep those DLLs alongside the executable.
+
+The Windows application supports per-monitor DPI scaling, including moving
+the window between displays with different scale settings.
+
 ## Tests
 
 ```bash

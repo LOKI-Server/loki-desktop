@@ -33,6 +33,17 @@ target("loki-sync")
         add_rules("win.sdk.application")
         add_defines("UNICODE", "_UNICODE", "NOMINMAX")
         add_files("res/loki-sync.rc")
+        -- The resource embeds wxWidgets' complete PerMonitorV2 manifest.
+        add_ldflags("/MANIFEST:NO", {tools = "link", force = true})
+        -- Explorer does not inherit the package PATH set by `xmake run`.
+        -- Keep the prebuilt wxWidgets runtime beside the executable.
+        after_build(function (target)
+            for _, file in ipairs(target:pkg("wxwidgets"):libraryfiles()) do
+                if path.extension(file):lower() == ".dll" then
+                    os.cp(file, target:targetdir())
+                end
+            end
+        end)
     end
 
 target("loki-sync-tests")

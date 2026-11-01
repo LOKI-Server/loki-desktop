@@ -2,6 +2,7 @@
 
 #include <wx/dirdlg.h>
 #include <wx/filename.h>
+#include <wx/iconbndl.h>
 #include <wx/numdlg.h>
 #include <wx/platinfo.h>
 #include <wx/utils.h>
@@ -100,8 +101,11 @@ private:
 }  // namespace
 
 MainFrame::MainFrame(Store& store)
-    : wxFrame(nullptr, wxID_ANY, "LOKI Sync", wxDefaultPosition, wxSize(820, 560)), store_(store), timer_(this), settle_(this) {
-    SetIcon(tree_icon(32));
+    : wxFrame(nullptr, wxID_ANY, "LOKI Sync"), store_(store), timer_(this), settle_(this) {
+    SetSize(FromDIP(wxSize(820, 560)));
+    wxIconBundle icons;
+    for (const int size : {16, 24, 32, 48, 64}) icons.AddIcon(tree_icon(size));
+    SetIcons(icons);
     SetMinSize(FromDIP(wxSize(640, 420)));
     book_ = new wxSimplebook(this);
     book_->AddPage(BuildConnect(book_), "Connect");
@@ -245,7 +249,7 @@ wxPanel* MainFrame::BuildConnect(wxWindow* parent) {
     pairing_panel_ = new wxPanel(page);
     auto* pairing = new wxBoxSizer(wxVERTICAL);
     pairing->Add(new wxStaticText(pairing_panel_, wxID_ANY,
-                                  "Approve this code in the LOKI dashboard: Save sync → Pair a device."),
+                                  wxS("Approve this code in the LOKI dashboard: Save sync → Pair a device.")),
                  0, wxBOTTOM, FromDIP(8));
     user_code_ = new wxStaticText(pairing_panel_, wxID_ANY, "");
     user_code_->SetFont(wxFont(wxFontInfo(28).Family(wxFONTFAMILY_TELETYPE).Bold()));
@@ -456,6 +460,13 @@ wxPanel* MainFrame::BuildFolders(wxWindow* parent) {
     list_->AppendColumn("Holds", wxLIST_FORMAT_LEFT, FromDIP(140));
     list_->AppendColumn("On this computer", wxLIST_FORMAT_LEFT, FromDIP(230));
     list_->AppendColumn("Last sync", wxLIST_FORMAT_LEFT, FromDIP(260));
+    // wxWidgets rescales fonts and sizers; list column widths are application-owned.
+    list_->Bind(wxEVT_DPI_CHANGED, [this](wxDPIChangedEvent& e) {
+        for (int i = 0; i < list_->GetColumnCount(); ++i) {
+            list_->SetColumnWidth(i, e.ScaleX(list_->GetColumnWidth(i)));
+        }
+        e.Skip();
+    });
     list_->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) { OnChooseLocal(); });
     column->Add(list_, 1, wxEXPAND | wxTOP, FromDIP(8));
 
@@ -465,10 +476,10 @@ wxPanel* MainFrame::BuildFolders(wxWindow* parent) {
         b->Bind(wxEVT_BUTTON, [action](wxCommandEvent&) { action(); });
         buttons->Add(b, 0, wxRIGHT, FromDIP(6));
     };
-    add("Choose local folder…", [this] { OnChooseLocal(); });
+    add(wxS("Choose local folder…"), [this] { OnChooseLocal(); });
     add("Stop syncing", [this] { OnStop(); });
     add("Sync now", [this] { SyncNow(); });
-    add("New server folder…", [this] { OnNewFolder(); });
+    add(wxS("New server folder…"), [this] { OnNewFolder(); });
     add("Refresh", [this] { Refresh(); });
     column->Add(buttons, 0, wxTOP, FromDIP(8));
 
@@ -516,11 +527,11 @@ void MainFrame::Populate() {
         list_->SetItem(row, 1, kind_label(f.kind));
         auto m = mappings.find(f.id);
         if (m == mappings.end()) {
-            list_->SetItem(row, 2, "Not synced here — choose a folder");
+            list_->SetItem(row, 2, wxS("Not synced here — choose a folder"));
             list_->SetItem(row, 3, "");
         } else {
             list_->SetItem(row, 2, W(U(wxString(m->second.local.wstring()))));
-            list_->SetItem(row, 3, when(m->second.last_sync) + (m->second.last_result.empty() ? "" : " · ") +
+            list_->SetItem(row, 3, when(m->second.last_sync) + (m->second.last_result.empty() ? wxS("") : wxS(" · ")) +
                                        W(m->second.last_result));
             if (m->second.failed) list_->SetItemTextColour(row, wxColour(200, 70, 60));
         }
@@ -602,8 +613,8 @@ void MainFrame::SyncNow() {
         return;
     }
     rerun_ = false;
-    status_->SetLabel("Syncing…");
-    if (tray_) tray_->SetIcon(tree_icon(32), "LOKI Sync — syncing");
+    status_->SetLabel(wxS("Syncing…"));
+    if (tray_) tray_->SetIcon(tree_icon(32), wxS("LOKI Sync — syncing"));
     auto outcomes = std::make_shared<std::map<std::string, Outcome>>();
     Background([this, outcomes] { *outcomes = Engine(store_).sync_all(); },
                [this, outcomes](std::optional<std::string> error) {
@@ -611,7 +622,7 @@ void MainFrame::SyncNow() {
                    int failed = 0;
                    for (const auto& [id, outcome] : *outcomes) failed += outcome.errors.empty() ? 0 : 1;
                    status_->SetLabel(error ? W(*error)
-                                     : failed ? wxString::Format("Last sync %s — %d folder(s) need attention",
+                                     : failed ? wxString::Format(wxS("Last sync %s — %d folder(s) need attention"),
                                                                  wxDateTime::Now().FormatTime(), failed)
                                               : "Last sync " + wxDateTime::Now().FormatTime());
                    if (tray_) tray_->SetIcon(tree_icon(32), "LOKI Sync");
