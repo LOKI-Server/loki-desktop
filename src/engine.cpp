@@ -1,6 +1,7 @@
 #include "engine.hpp"
 
 #include <chrono>
+#include <functional>
 #include <mutex>
 #include <random>
 #include <set>
@@ -70,18 +71,47 @@ struct Run {
     Api& api;
     fs::path root;
     SyncIndex& index;
+    /** The directory as last scanned; a download may only replace what this describes. */
+    const std::map<std::string, LocalFile>& local;
+    const std::function<void(const std::string&)>& before_replace;
     Outcome outcome;
 
-    /** Writes a server version locally, all or nothing. */
+    /**
+     * Whether the local file differs from the last scan: an emulator saved,
+     * created, or removed it while this pass was running.
+     */
+    bool changed_since_scan(const std::string& path, const fs::path& target) const {
+        std::error_code error;
+        const bool exists = fs::is_regular_file(target, error);
+        const auto seen = local.find(path);
+        if (seen == local.end()) return exists;
+        if (!exists) return true;
+        const auto size = fs::file_size(target, error);
+        if (error) return true;
+        return std::int64_t(size) != seen->second.size || mtime_ms(target) != seen->second.mtime;
+    }
+
+    /**
+     * Writes a server version locally, all or nothing. If the local file changed
+     * since the scan it is left alone: the next pass sees the local change and
+     * resolves it as a conflict, so neither version is lost.
+     */
     void download(const RemoteChange& change) {
         if (!change.hash) return;
         const auto target = physical(root, change.path);
+        if (changed_since_scan(change.path, target)) return;
         fs::create_directories(target.parent_path());
         const auto staged = target.parent_path() / temporary_name();
         try {
             api.download_blob(*change.hash, staged);
             if (Sha256::of_file(staged) != *change.hash) {
                 throw std::runtime_error(change.path + " arrived damaged; it will be fetched again.");
+            }
+            if (before_replace) before_replace(change.path);
+            // Checked again at the last moment, leaving only a microsecond window.
+            if (changed_since_scan(change.path, target)) {
+                fs::remove(staged);
+                return;
             }
             fs::rename(staged, target);
         } catch (...) {
@@ -158,10 +188,11 @@ Outcome Engine::sync_folder(const Mapping& mapping) {
     }
     const auto index_file = store_.index_file(mapping.folder_id);
     auto index = SyncIndex::load(index_file);
-    Run run{api, root, index, {}};
+    std::map<std::string, LocalFile> local;
+    Run run{api, root, index, local, before_replace, {}};
 
     // 1. Scan.
-    auto local = scan(root);
+    local = scan(root);
     const auto now = now_ms();
     std::map<std::string, std::string> hashes;
     std::set<std::string> dirty, unsettled;
@@ -214,6 +245,8 @@ Outcome Engine::sync_folder(const Mapping& mapping) {
                 if (change.hash) run.download(change);
                 else index.entries[path] = {change.version, std::nullopt, 0, 0};
             } else if (!change.hash) {
+                // A save written since the scan outlives the deletion; the next pass sends it.
+                if (run.changed_since_scan(path, physical(root, path))) continue;
                 if (local.contains(path)) {
                     fs::remove(local.at(path).file);
                     local.erase(path);

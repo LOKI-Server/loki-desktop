@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -39,6 +40,9 @@ public:
 
     /** Emulators write saves in bursts; wait until a file has been still this long. */
     static constexpr long long settle_ms = 3000;
+
+    /** Tests only: runs just before a download replaces a local file. */
+    std::function<void(const std::string& path)> before_replace;
 
 private:
     Outcome sync_folder(const Mapping& mapping);

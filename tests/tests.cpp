@@ -151,6 +151,33 @@ static void two_devices(const std::string& server, const std::string& user, cons
     CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(10));
     CHECK(watcher.watch(watched.state, 1).changed == false);
 
+    // An emulator saving just as a download would replace its file keeps its save;
+    // the incoming version stays on the server as a conflict instead of being lost.
+    write(home_a / "saves/Emerald.srm", "badge 4 on A");
+    age(home_a / "saves/Emerald.srm");
+    CHECK(sync_a.sync(*a.mapping(folder.id)).uploaded == 1);
+    sync_b.before_replace = [&](const std::string& path) {
+        if (path != "Emerald.srm") return;
+        write(home_b / "saves/Emerald.srm", "badge 5 saved on B mid-sync");
+        age(home_b / "saves/Emerald.srm");
+    };
+    const auto raced = sync_b.sync(*b.mapping(folder.id));
+    sync_b.before_replace = nullptr;
+    CHECK(raced.downloaded == 0 && raced.errors.empty());
+    CHECK(read(home_b / "saves/Emerald.srm") == "badge 5 saved on B mid-sync");
+    const auto resolved = sync_b.sync(*b.mapping(folder.id));
+    CHECK(resolved.uploaded == 1 && resolved.conflicts == 1);
+    CHECK(sync_a.sync(*a.mapping(folder.id)).downloaded == 1);
+    CHECK(read(home_a / "saves/Emerald.srm") == "badge 5 saved on B mid-sync");
+
+    // A save still being written when the other computer's deletion arrives is kept.
+    fs::remove(home_a / "saves/new.sav");
+    CHECK(sync_a.sync(*a.mapping(folder.id)).uploaded == 1);
+    write(home_b / "saves/new.sav", "saved on B before the deletion arrived");
+    const auto kept = sync_b.sync(*b.mapping(folder.id));
+    CHECK(kept.removed == 0);
+    CHECK(read(home_b / "saves/new.sav") == "saved on B before the deletion arrived");
+
     // Files still being written wait for the next pass.
     write(home_a / "saves/busy.sav", "writing");
     CHECK(sync_a.sync(*a.mapping(folder.id)).uploaded == 0);
