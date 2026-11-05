@@ -64,7 +64,7 @@ RemoteChange change(const json& o, const std::string& path = {}) {
 Session session(const json& o) {
     const auto& user = o.at("user");
     const std::string username = user.at("username");
-    return {o.at("token"), o.at("device").at("id"), username, user.value("display_name", username)};
+    return {o.at("token"), o.at("device").at("id"), username, user.value("display_name", username), o.value("access", json::object()).value("sync", true)};
 }
 
 Folder folder(const json& o) {
@@ -157,13 +157,13 @@ std::string Api::ok(const std::string& method, const std::string& path, const st
 }
 
 Discovery Api::discover() {
-    auto o = json::parse(ok("GET", "/sync/v1"));
+    auto o = json::parse(ok("GET", "/auth/v1"));
     return {o.value("name", "LOKI"), o.value("protocol", 0), o.value("max_file_bytes", std::int64_t(0))};
 }
 
 Pairing Api::pair(const std::string& device_name, const std::string& platform) {
     const auto body = json{{"name", device_name}, {"platform", platform}}.dump();
-    auto o = json::parse(ok("POST", "/sync/v1/pair", &body));
+    auto o = json::parse(ok("POST", "/auth/v1/pair", &body));
     return {o.at("device_code"),       o.at("user_code"),       o.at("verification_uri"),
             o.at("verification_uri_complete"), o.value("interval", 5), o.value("expires_in", 600)};
 }
@@ -171,7 +171,7 @@ Pairing Api::pair(const std::string& device_name, const std::string& platform) {
 std::optional<Session> Api::poll(const std::string& device_code) {
     const auto body = json{{"device_code", device_code}}.dump();
     try {
-        return session(json::parse(ok("POST", "/sync/v1/pair/poll", &body)));
+        return session(json::parse(ok("POST", "/auth/v1/pair/poll", &body)));
     } catch (const ApiError& e) {
         if (e.code == "authorization_pending" || e.code == "slow_down") return std::nullopt;
         throw;
@@ -183,15 +183,17 @@ Session Api::login(const std::string& username, const std::string& password, con
     const auto body = json{{"username", username}, {"password", password}, {"code", code},
                            {"name", device_name},  {"platform", platform}}
                           .dump();
-    return session(json::parse(ok("POST", "/sync/v1/login", &body)));
+    return session(json::parse(ok("POST", "/auth/v1/login", &body)));
 }
+
+bool Api::sync_access() { return json::parse(ok("GET", "/auth/v1/me")).at("access").at("sync").get<bool>(); }
 
 Quota Api::quota() {
     auto o = json::parse(ok("GET", "/sync/v1/me"));
     return {o.at("quota").at("used"), o.at("quota").at("limit"), o.value("max_file_bytes", std::int64_t(0))};
 }
 
-void Api::sign_out() { ok("DELETE", "/sync/v1/device"); }
+void Api::sign_out() { ok("DELETE", "/auth/v1/device"); }
 
 std::vector<Folder> Api::folders() {
     std::vector<Folder> out;

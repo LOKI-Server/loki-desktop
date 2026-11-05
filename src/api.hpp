@@ -29,6 +29,7 @@ struct Pairing {
 };
 struct Session {
     std::string token, device_id, username, display_name;
+    bool can_sync = true;
 };
 struct Folder {
     std::string id, name, kind;
@@ -83,6 +84,7 @@ public:
     Session login(const std::string& username, const std::string& password, const std::string& code,
                   const std::string& device_name, const std::string& platform);
     Quota quota();
+    bool sync_access();
     void sign_out();
 
     std::vector<Folder> folders();
@@ -102,6 +104,7 @@ public:
     static std::string normalize(std::string url);
 
 private:
+    friend class FilesApi;
     struct Response {
         long status = 0;
         std::string body;

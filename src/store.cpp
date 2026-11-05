@@ -1,4 +1,5 @@
 #include "store.hpp"
+#include "files_api.hpp"
 
 #include <cctype>
 #include <fstream>
@@ -40,13 +41,24 @@ fs::path from_utf8(const std::string& text) { return fs::path(std::u8string(text
 Store::Store(fs::path directory) : directory_(std::move(directory)) {
     fs::create_directories(directory_ / "index");
     const auto file = directory_ / "config.json";
-    if (!fs::exists(file)) return;
     auto o = json::parse(read_text(file), nullptr, false);
-    if (!o.is_object()) return;
+    if (!o.is_object()) o = json::object();
+    // Earlier clients stored a second file-access login. Reuse it only when no
+    // primary login exists; a signed-in sync account always takes precedence.
+    if (o.value("token", "").empty()) {
+        const auto legacy = json::parse(read_text(directory_ / "files.json"), nullptr, false);
+        if (legacy.is_object() && !legacy.value("token", "").empty()) {
+            for (const auto* key : {"server", "token", "username", "display_name"}) o[key] = legacy.value(key, "");
+            o["can_sync"] = legacy.value("can_sync", true);
+            write_atomically(file, o.dump(2));
+            write_atomically(directory_ / "files.json", "{}");
+        }
+    }
     server_ = o.value("server", "");
     token_ = o.value("token", "");
     username_ = o.value("username", "");
     display_name_ = o.value("display_name", "");
+    can_sync_ = o.value("can_sync", true);
     if (o.contains("mappings")) {
         for (const auto& [id, m] : o["mappings"].items()) {
             mappings_[id] = {id, from_utf8(m.value("path", "")), m.value("last_sync", std::int64_t(0)),
@@ -67,6 +79,7 @@ void Store::save() const {
            {"token", token_},
            {"username", username_},
            {"display_name", display_name_},
+           {"can_sync", can_sync_},
            {"mappings", mappings}};
     write_atomically(directory_ / "config.json", o.dump(2));
 }
@@ -87,6 +100,13 @@ bool Store::signed_in() const {
     std::lock_guard lock(mutex_);
     return !server_.empty() && !token_.empty();
 }
+bool Store::can_sync() const { std::lock_guard lock(mutex_); return can_sync_; }
+Session Store::session() const {
+    std::lock_guard lock(mutex_);
+    return {token_, "", username_, display_name_, can_sync_};
+}
+FilesApi Store::files_api() const { std::lock_guard lock(mutex_); return FilesApi(server_,token_); }
+void Store::set_sync_access(bool allowed) { std::lock_guard lock(mutex_); can_sync_=allowed; save(); }
 Api Store::api() const {
     std::lock_guard lock(mutex_);
     return Api(server_, token_);
@@ -98,6 +118,7 @@ void Store::sign_in(const std::string& server, const Session& session) {
     token_ = session.token;
     username_ = session.username;
     display_name_ = session.display_name;
+    can_sync_ = session.can_sync;
     save();
 }
 
@@ -107,6 +128,7 @@ void Store::sign_out() {
     token_.clear();
     username_.clear();
     display_name_.clear();
+    write_atomically(directory_ / "files.json", "{}");
     mappings_.clear();
     std::error_code ignored;
     fs::remove_all(directory_ / "index", ignored);

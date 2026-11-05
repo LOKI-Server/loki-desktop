@@ -32,6 +32,7 @@ public:
 
     void SyncNow();
     void ShowWindow();
+    void BrowseFiles();
     void Quit();
 
 private:

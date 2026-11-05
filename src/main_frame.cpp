@@ -11,6 +11,8 @@
 #include <thread>
 
 #include "engine.hpp"
+#include "files_dialog.hpp"
+#include "files_api.hpp"
 
 namespace loki {
 namespace {
@@ -82,13 +84,16 @@ public:
 protected:
     wxMenu* CreatePopupMenu() override {
         auto* menu = new wxMenu;
-        menu->Append(wxID_OPEN, "Open LOKI Sync");
+        menu->Append(wxID_OPEN, "Open LOKI Client");
         menu->Append(wxID_REFRESH, "Sync now");
+        const auto browse = wxWindow::NewControlId();
+        menu->Append(browse, wxS("Browse files…"));
         menu->AppendSeparator();
         menu->Append(wxID_EXIT, "Quit");
-        menu->Bind(wxEVT_MENU, [this](wxCommandEvent& e) {
+        menu->Bind(wxEVT_MENU, [this, browse](wxCommandEvent& e) {
             if (e.GetId() == wxID_OPEN) frame_->ShowWindow();
             if (e.GetId() == wxID_REFRESH) frame_->SyncNow();
+            if (e.GetId() == browse) frame_->BrowseFiles();
             if (e.GetId() == wxID_EXIT) frame_->Quit();
         });
         return menu;
@@ -101,12 +106,24 @@ private:
 }  // namespace
 
 MainFrame::MainFrame(Store& store)
-    : wxFrame(nullptr, wxID_ANY, "LOKI Sync"), store_(store), timer_(this), settle_(this) {
+    : wxFrame(nullptr, wxID_ANY, "LOKI Client"), store_(store), timer_(this), settle_(this) {
     SetSize(FromDIP(wxSize(820, 560)));
     wxIconBundle icons;
     for (const int size : {16, 24, 32, 48, 64}) icons.AddIcon(tree_icon(size));
     SetIcons(icons);
     SetMinSize(FromDIP(wxSize(640, 420)));
+    auto* menus = new wxMenuBar;
+    auto* app_menu = new wxMenu;
+    const auto browse = wxWindow::NewControlId();
+    app_menu->Append(browse, wxS("Browse files…"));
+    app_menu->Append(wxID_REFRESH, "Sync now");
+    app_menu->AppendSeparator();
+    app_menu->Append(wxID_EXIT, "Quit");
+    menus->Append(app_menu, "&More");
+    SetMenuBar(menus);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { BrowseFiles(); }, browse);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { SyncNow(); }, wxID_REFRESH);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { Quit(); }, wxID_EXIT);
     book_ = new wxSimplebook(this);
     book_->AddPage(BuildConnect(book_), "Connect");
     book_->AddPage(BuildFolders(book_), "Folders");
@@ -116,7 +133,7 @@ MainFrame::MainFrame(Store& store)
 
     if (wxTaskBarIcon::IsAvailable()) {
         tray_ = std::make_unique<Tray>(this);
-        tray_->SetIcon(tree_icon(32), "LOKI Sync");
+        tray_->SetIcon(tree_icon(32), "LOKI Client");
     }
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& e) {
         // Closing hides to the notification area; syncing carries on.
@@ -186,6 +203,13 @@ void MainFrame::Quit() {
     Close(true);
 }
 
+void MainFrame::BrowseFiles() {
+    ShowWindow();
+    const bool was_signed_in = store_.signed_in();
+    show_file_browser(this, store_, store_.signed_in() ? store_.server() : U(server_->GetValue()));
+    if (!was_signed_in && store_.signed_in()) FinishSignIn(store_.server(), store_.session());
+}
+
 // ---- Connecting -------------------------------------------------------------
 
 wxPanel* MainFrame::BuildConnect(wxWindow* parent) {
@@ -249,7 +273,7 @@ wxPanel* MainFrame::BuildConnect(wxWindow* parent) {
     pairing_panel_ = new wxPanel(page);
     auto* pairing = new wxBoxSizer(wxVERTICAL);
     pairing->Add(new wxStaticText(pairing_panel_, wxID_ANY,
-                                  wxS("Approve this code in the LOKI dashboard: Save sync → Pair a device.")),
+                                  wxS("Approve this code in the LOKI dashboard: Account → Devices → Pair a device.")),
                  0, wxBOTTOM, FromDIP(8));
     user_code_ = new wxStaticText(pairing_panel_, wxID_ANY, "");
     user_code_->SetFont(wxFont(wxFontInfo(28).Family(wxFONTFAMILY_TELETYPE).Bold()));
@@ -390,7 +414,7 @@ void MainFrame::FinishSignIn(const std::string& server, const Session& session) 
 
 void MainFrame::StartWatching() {
     StopWatching();
-    if (!store_.signed_in()) return;
+    if (!store_.signed_in() || !store_.can_sync()) return;
     auto active = watching_ = std::make_shared<std::atomic<bool>>(true);
     std::thread([this, active, alive = alive_, api = store_.api()]() mutable {
         std::string state;
@@ -497,17 +521,28 @@ void MainFrame::Refresh() {
     account_->SetLabel(W(store_.display_name() + "  ·  " + store_.server()));
     auto folders = std::make_shared<std::vector<Folder>>();
     auto quota = std::make_shared<Quota>();
+    auto access = std::make_shared<bool>(true);
     auto api = std::make_shared<Api>(store_.api());
     Background(
-        [api, folders, quota] {
+        [api, folders, quota, access] {
+            *access = api->sync_access();
+            if (!*access) return;
             *folders = api->folders();
             *quota = api->quota();
         },
-        [this, folders, quota](std::optional<std::string> error) {
+        [this, folders, quota, access](std::optional<std::string> error) {
             if (error) {
                 status_->SetLabel(W(*error));
                 return;
             }
+            store_.set_sync_access(*access);
+            if (!*access) {
+                StopWatching(); folders_.clear(); list_->DeleteAllItems(); quota_->SetValue(0);
+                quota_text_->SetLabel("File sharing is available from More → Browse files.");
+                status_->SetLabel("Your account does not have access to Save sync.");
+                return;
+            }
+            if (!watching_ || !*watching_) StartWatching();
             folders_ = *folders;
             const auto limit = std::max<std::int64_t>(quota->limit, 1);
             quota_->SetValue(int(std::min<std::int64_t>(1000, quota->used * 1000 / limit)));
@@ -596,6 +631,10 @@ void MainFrame::OnSignOut() {
     }
     auto api = std::make_shared<Api>(store_.api());
     Background([api] { api->sign_out(); }, [](std::optional<std::string>) {});
+    const auto legacy = FileStore(store_.directory()).get();
+    if (!legacy.session.token.empty() && legacy.session.token != store_.token()) {
+        Background([legacy] { FilesApi(legacy.server,legacy.session.token).sign_out(); }, [](std::optional<std::string>) {});
+    }
     StopWatching();
     store_.sign_out();
     if (files_) files_->RemoveAll();
@@ -607,14 +646,14 @@ void MainFrame::OnSignOut() {
 }
 
 void MainFrame::SyncNow() {
-    if (!store_.signed_in()) return;
+    if (!store_.signed_in() || !store_.can_sync()) return;
     if (syncing_.exchange(true)) {
         rerun_ = true;
         return;
     }
     rerun_ = false;
     status_->SetLabel(wxS("Syncing…"));
-    if (tray_) tray_->SetIcon(tree_icon(32), wxS("LOKI Sync — syncing"));
+    if (tray_) tray_->SetIcon(tree_icon(32), wxS("LOKI Client — syncing"));
     auto outcomes = std::make_shared<std::map<std::string, Outcome>>();
     Background([this, outcomes] { *outcomes = Engine(store_).sync_all(); },
                [this, outcomes](std::optional<std::string> error) {
@@ -625,7 +664,7 @@ void MainFrame::SyncNow() {
                                      : failed ? wxString::Format(wxS("Last sync %s — %d folder(s) need attention"),
                                                                  wxDateTime::Now().FormatTime(), failed)
                                               : "Last sync " + wxDateTime::Now().FormatTime());
-                   if (tray_) tray_->SetIcon(tree_icon(32), "LOKI Sync");
+                   if (tray_) tray_->SetIcon(tree_icon(32), "LOKI Client");
                    Populate();
                    if (rerun_) CallAfter([this] { SyncNow(); });
                });

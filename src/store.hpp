@@ -10,6 +10,7 @@
 #include "api.hpp"
 
 namespace loki {
+class FilesApi;
 
 /** Where a server folder lives on this computer, and how its last sync went. */
 struct Mapping {
@@ -29,7 +30,11 @@ public:
     std::string token() const;
     std::string display_name() const;
     bool signed_in() const;
+    bool can_sync() const;
+    Session session() const;
     Api api() const;
+    FilesApi files_api() const;
+    void set_sync_access(bool allowed);
 
     void sign_in(const std::string& server, const Session& session);
     void sign_out();
@@ -48,6 +53,7 @@ private:
     std::filesystem::path directory_;
     mutable std::mutex mutex_;
     std::string server_, token_, username_, display_name_;
+    bool can_sync_ = true;
     std::map<std::string, Mapping> mappings_;
 };
 

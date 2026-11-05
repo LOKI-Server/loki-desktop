@@ -11,6 +11,7 @@
 #include "engine.hpp"
 #include "index.hpp"
 #include "sha256.hpp"
+#include "files_api.hpp"
 
 namespace fs = std::filesystem;
 using namespace loki;
@@ -80,6 +81,95 @@ static void naming() {
     some.downloaded = 2;
     some.conflicts = 1;
     CHECK(some.summary() == "2 received \xC2\xB7 1 conflict kept on the server");
+}
+
+static void file_sessions() {
+    auto dir = scratch("file-sessions");
+    Store sync(dir);
+    sync.sign_in("https://sync.example", {"sync-token","sync-device","reader","Reader"});
+    sync.save_mapping({"save-folder", dir / "saves"});
+    FileStore files(dir);
+    CHECK(files.get().session.token.empty());
+    files.save("https://files.example/", {"files-token","files-device","reader","Reader"});
+    FileStore loaded(dir);
+    CHECK(loaded.get().server == "https://files.example");
+    CHECK(loaded.get().session.token == "files-token");
+    loaded.clear();
+    CHECK(FileStore(dir).get().session.token.empty());
+    CHECK(sync.token() == "sync-token");
+    CHECK(sync.mapping("save-folder").has_value());
+    // An existing primary login always wins over a separate legacy login.
+    files.save("https://legacy.example", {"legacy-token","old-device","other","Other"});
+    CHECK(Store(dir).token() == "sync-token");
+    sync.sign_out();
+    CHECK(!Store(dir).signed_in()); // Sign-out cannot resurrect legacy credentials.
+    auto migrated_dir = dir / "migration";
+    FileStore(migrated_dir).save("https://files.example", {"file-token","file-device","reader","Reader"});
+    Store migrated(migrated_dir);
+    CHECK(migrated.token() == "file-token");
+    CHECK(migrated.server() == "https://files.example");
+    CHECK(FileStore(migrated_dir).get().session.token.empty());
+    fs::remove_all(dir);
+}
+
+/** Exercises the Files API against the local HTTP test fixture. */
+static void shared_files(const std::string& server) {
+    FilesApi public_api(server);
+    public_api.discover();
+    try { FilesApi(server+"/legacy").discover(); CHECK(false); }
+    catch (const std::runtime_error& e) { CHECK(std::string(e.what()).find("Update LOKI Server") != std::string::npos); }
+    const auto session = public_api.login("reader","test-password","","Desktop test","test");
+    CHECK(session.token == "download-token");
+    FilesApi api(server,session.token);
+    CHECK(api.shares().at(0).name == "Archive");
+    const auto listing = api.entries("archive","Games/日本語 + #",1);
+    CHECK(listing.page == 1 && listing.total == 101);
+    CHECK(listing.entries.at(0).name == "日本語 + #.bin");
+    auto dir = scratch("shared-files");
+    Store account(dir / "account");
+    account.sign_in(server,session);
+    CHECK(account.files_api().shares().at(0).name == "Archive");
+    CHECK(account.api().sync_access()); // The same saved credential serves both APIs.
+    const auto original = api.download("archive","日本語 + #.bin",dir,[](auto,auto) { return true; });
+    const auto contents = read(original);
+    CHECK(!contents.empty());
+    const auto meta = api.metadata("archive","file");
+    CHECK(meta.sha256 == Sha256::of(contents));
+    auto partial = [&](const std::string& path) {
+        const auto metadata = api.metadata("archive",path);
+        const auto key = Sha256::of(Api::normalize(server) + '\0' + "archive" + '\0' + path + '\0' + metadata.sha256);
+        const auto file = dir/(key+".part");
+        write(file,contents.substr(0,65536));
+        return file;
+    };
+    for (const auto path : {"file","restart"}) {
+        partial(path);
+        const auto received=api.download("archive",path,dir,[](auto,auto) { return true; });
+        CHECK(read(received)==contents);
+    }
+    const auto bad_range=partial("badRange");
+    try { api.download("archive","badRange",dir,[](auto,auto) { return true; }); CHECK(false); }
+    catch (const std::runtime_error&) { CHECK(fs::file_size(bad_range)==65536); }
+    try { api.download("archive","interrupt",dir,[](auto,auto) { return true; }); CHECK(false); }
+    catch (const std::runtime_error&) {
+        const auto key=Sha256::of(Api::normalize(server)+'\0'+"archive"+'\0'+"interrupt"+'\0'+meta.sha256);
+        CHECK(fs::file_size(dir/(key+".part"))==65536);
+    }
+    try { api.download("archive","badHash",dir,[](auto,auto) { return true; }); CHECK(false); }
+    catch (const std::runtime_error&) {
+        const auto key=Sha256::of(Api::normalize(server)+'\0'+"archive"+'\0'+"badHash"+'\0'+std::string(64,'0'));
+        CHECK(!fs::exists(dir/(key+".part")));
+    }
+    CHECK(fs::file_size(api.download("archive","empty",dir,[](auto,auto) { return true; }))==0);
+    try { api.download("archive","cancel",dir,[](auto received,auto) { return received==0; }); CHECK(false); }
+    catch (const std::runtime_error&) {}
+    CHECK(read(api.download("archive","cancel",dir,[](auto,auto) { return true; }))==contents);
+    try { FilesApi(server,"revoked").shares(); CHECK(false); }
+    catch (const ApiError& e) { CHECK(e.status==401 && e.code=="unauthorized"); }
+    try { api.entries("archive","forbidden"); CHECK(false); }
+    catch (const ApiError& e) { CHECK(e.status==403 && e.code=="forbidden"); }
+    api.sign_out();
+    fs::remove_all(dir);
 }
 
 /** Two computers share a folder through a live server, including a conflict. */
@@ -192,6 +282,8 @@ int main() try {
     hashing();
     indexes();
     naming();
+    file_sessions();
+    if (const auto* fixture = std::getenv("LOKI_FILES_TEST_SERVER")) shared_files(fixture);
     const char* server = std::getenv("LOKI_TEST_SERVER");
     const char* user = std::getenv("LOKI_TEST_USER");
     const char* password = std::getenv("LOKI_TEST_PASSWORD");

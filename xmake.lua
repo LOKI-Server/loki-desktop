@@ -1,4 +1,4 @@
--- LOKI Sync for desktop: keeps folders in step with a LOKI server's Save sync.
+-- LOKI Client for desktop: keeps folders in step with a LOKI server's Save sync.
 --
 --   xmake                 # build (fetches wxWidgets, libcurl, nlohmann_json)
 --   xmake run loki-sync   # start it
@@ -16,7 +16,7 @@ add_requires("wxwidgets", "libcurl", "nlohmann_json")
 -- Everything except the GUI, so tests can link it without wxWidgets.
 target("loki-core")
     set_kind("static")
-    add_files("src/api.cpp", "src/engine.cpp", "src/index.cpp", "src/sha256.cpp", "src/store.cpp")
+    add_files("src/api.cpp", "src/files_api.cpp", "src/engine.cpp", "src/index.cpp", "src/sha256.cpp", "src/store.cpp")
     add_includedirs("src", {public = true})
     add_packages("libcurl", "nlohmann_json", {public = true})
     if is_plat("windows") then
@@ -26,8 +26,9 @@ target("loki-core")
 
 target("loki-sync")
     set_kind("binary")
+    set_basename("loki-client")
     add_deps("loki-core")
-    add_files("src/app.cpp", "src/main_frame.cpp")
+    add_files("src/app.cpp", "src/main_frame.cpp", "src/files_dialog.cpp")
     add_packages("wxwidgets")
     if is_plat("windows") then
         add_rules("win.sdk.application")
