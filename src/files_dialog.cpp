@@ -17,6 +17,12 @@ namespace {
 wxString W(const std::string& value) { return wxString::FromUTF8(value); }
 std::string U(const wxString& value) { return value.utf8_string(); }
 wxString size_text(std::int64_t size) { return wxFileName::GetHumanReadableSize(wxULongLong(size),"0 B",1); }
+/** Keeps list notifications from re-entering the dialog while rows are replaced. */
+struct Hold {
+    bool& flag;
+    explicit Hold(bool& flag) : flag(flag) { flag = true; }
+    ~Hold() { flag = false; }
+};
 
 class FilesDialog : public wxDialog {
 public:
@@ -69,9 +75,14 @@ public:
         list_->AppendColumn("Name",wxLIST_FORMAT_LEFT,FromDIP(330));
         list_->AppendColumn("Size",wxLIST_FORMAT_RIGHT,FromDIP(100));
         list_->AppendColumn("Modified",wxLIST_FORMAT_LEFT,FromDIP(160));
-        list_->Bind(wxEVT_LIST_ITEM_ACTIVATED,[this](wxListEvent&) { OpenSelected(); });
-        list_->Bind(wxEVT_LIST_ITEM_SELECTED,[this](wxListEvent&) { UpdateControls(); });
-        list_->Bind(wxEVT_LIST_ITEM_DESELECTED,[this](wxListEvent&) { UpdateControls(); });
+        // GTK draws wxListCtrl itself. Disabling or rebuilding it inside the
+        // activation handler faults the process; Windows' native control does not.
+        list_->Bind(wxEVT_LIST_ITEM_ACTIVATED,[this](wxListEvent& e) {
+            const long row=e.GetIndex();
+            CallAfter([this,alive=alive_,row] { if (*alive) OpenRow(row); });
+        });
+        list_->Bind(wxEVT_LIST_ITEM_SELECTED,[this](wxListEvent&) { if (!rebuilding_) UpdateControls(); });
+        list_->Bind(wxEVT_LIST_ITEM_DESELECTED,[this](wxListEvent&) { if (!rebuilding_) UpdateControls(); });
         list_->Bind(wxEVT_DPI_CHANGED,[this](wxDPIChangedEvent& e) {
             for (int i=0;i<list_->GetColumnCount();++i) list_->SetColumnWidth(i,e.ScaleX(list_->GetColumnWidth(i)));
             e.Skip();
@@ -132,12 +143,12 @@ private:
             if (!*alive) return;
             wxTheApp->CallAfter([alive,done,error,unauthorized,this] {
                 if (!*alive) return;
-                busy_ = false; gauge_->Hide(); cancel_->Hide();
                 try {
                     if (unauthorized) { status_->SetLabel("Your account session expired. Sign out and reconnect in the main window."); }
                     if (error.empty()) { status_->SetLabel(""); done(); }
                     else { status_->SetLabel(W(error)); status_->Wrap(GetClientSize().x-FromDIP(32)); }
                 } catch (const std::exception& e) { status_->SetLabel(W(e.what())); }
+                busy_ = false; gauge_->Hide(); cancel_->Hide();
                 UpdateControls(); Layout();
             });
         }).detach();
@@ -158,6 +169,7 @@ private:
     void LoadShares() {
         auto result=std::make_shared<std::vector<Share>>(); auto api=Api();
         Work([api,result]() mutable { api.discover(); *result=api.shares(); },[this,result] {
+            Hold hold(rebuilding_);
             share_.clear(); path_.clear(); shares_=*result; listing_={};
             location_->SetValue(W(account_.server()+" / Shares"));
             list_->DeleteAllItems();
@@ -169,14 +181,19 @@ private:
     void LoadEntries(const std::string& path, int page) {
         auto result=std::make_shared<ShareListing>(); auto api=Api(); const auto share=share_;
         Work([api,result,share,path,page]() mutable { *result=api.entries(share,path,page); },[this,result,path,page] {
+            Hold hold(rebuilding_);
             path_=path; page_=page; listing_=*result;
             location_->SetValue(W(share_name_+" / "+path_));
             list_->DeleteAllItems();
             for (size_t i=0;i<listing_.entries.size();++i) {
                 const auto& e=listing_.entries[i];
                 const auto row=list_->InsertItem(long(i),W(e.name)+(e.directory ? "/" : ""));
+                if (row<0) continue;
                 list_->SetItem(row,1,e.directory ? wxString("Folder") : size_text(e.size));
-                if (e.modified>0) list_->SetItem(row,2,wxDateTime(time_t(e.modified)).Format("%Y-%m-%d %H:%M"));
+                if (e.modified>0) {
+                    wxDateTime modified(time_t(e.modified));
+                    if (modified.IsValid()) list_->SetItem(row,2,modified.Format("%Y-%m-%d %H:%M"));
+                }
             }
             page_label_->SetLabel(wxString::Format("Page %d · %lld entries",page_+1,static_cast<long long>(listing_.total)));
             if (listing_.entries.empty()) status_->SetLabel("This folder is empty.");
@@ -195,9 +212,9 @@ private:
         const bool file=!share_.empty()&&row>=0&&size_t(row)<listing_.entries.size()&&!listing_.entries[size_t(row)].directory;
         download_->Enable(!busy_&&file);
     }
-    void OpenSelected() {
-        if (busy_) return;
-        const auto row=Selected(); if (row<0) return;
+    void OpenSelected() { OpenRow(Selected()); }
+    void OpenRow(long row) {
+        if (busy_ || rebuilding_ || row<0) return;
         if (share_.empty()) {
             if (size_t(row)>=shares_.size()) return;
             share_=shares_[size_t(row)].id; share_name_=shares_[size_t(row)].name; LoadEntries("",0); return;
@@ -247,7 +264,7 @@ private:
     Store& account_; fs::path cache_;
     std::shared_ptr<std::atomic<bool>> alive_=std::make_shared<std::atomic<bool>>(true);
     std::shared_ptr<std::atomic<bool>> cancelled_=std::make_shared<std::atomic<bool>>(false);
-    bool busy_=false;
+    bool busy_=false, rebuilding_=false;
     wxSimplebook* book_;
     wxTextCtrl *server_,*username_,*password_,*code_,*location_;
     wxButton *login_button_,*up_,*refresh_,*prev_,*next_,*download_,*signout_,*cancel_;
