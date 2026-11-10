@@ -89,6 +89,7 @@ private:
     wxStaticText* user_code_ = nullptr;
     wxString approval_url_;
     wxStaticText* connect_status_ = nullptr;
+    wxStaticText* http_warning_ = nullptr;
     std::optional<std::string> discovered_;
     std::shared_ptr<std::atomic<bool>> pairing_alive_;
 

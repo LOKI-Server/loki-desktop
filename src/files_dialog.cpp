@@ -48,7 +48,17 @@ public:
         password_ = field("Password",wxTE_PASSWORD);
         code_ = field("Authentication code");
         code_->SetHint("Only if two-factor authentication is enabled");
-        form->Add(grid,0,wxEXPAND|wxBOTTOM,FromDIP(12));
+        form->Add(grid,0,wxEXPAND|wxBOTTOM,FromDIP(8));
+        auto* http_warning=new wxStaticText(login,wxID_ANY,
+            "This address uses plain HTTP, so your sign-in and files travel unencrypted. Use HTTPS unless the server is on your own network.");
+        http_warning->SetForegroundColour(wxColour(200,70,60));
+        http_warning->Wrap(FromDIP(520));
+        http_warning->Hide();
+        form->Add(http_warning,0,wxBOTTOM,FromDIP(12));
+        server_->Bind(wxEVT_TEXT,[this,login,http_warning](wxCommandEvent& e) {
+            http_warning->Show(server_->GetValue().Strip(wxString::both).Lower().StartsWith("http://"));
+            login->Layout(); e.Skip();
+        });
         login_button_ = new wxButton(login,wxID_ANY,"Sign in");
         login_button_->Bind(wxEVT_BUTTON,[this](wxCommandEvent&) { Login(); });
         form->Add(login_button_);

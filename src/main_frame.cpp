@@ -5,7 +5,11 @@
 #include <wx/iconbndl.h>
 #include <wx/numdlg.h>
 #include <wx/platinfo.h>
+#include <wx/stdpaths.h>
 #include <wx/utils.h>
+#ifdef __WXMSW__
+#include <wx/msw/registry.h>
+#endif
 
 #include <chrono>
 #include <thread>
@@ -39,6 +43,31 @@ wxString kind_label(const std::string& kind) {
     }
     return W(kind);
 }
+
+const wxString kPlainHttpWarning =
+    "This address uses plain HTTP, so your sign-in and files travel unencrypted. Use HTTPS unless the "
+    "server is on your own network.";
+bool plain_http(const wxString& address) { return address.Strip(wxString::both).Lower().StartsWith("http://"); }
+
+#ifdef __WXMSW__
+// Starting at sign-in is a per-user Run entry that opens LOKI Client in the notification area.
+const wxString kRunKey = R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run)";
+const wxString kRunValue = "LOKI Client";
+wxString run_command() { return "\"" + wxStandardPaths::Get().GetExecutablePath() + "\" --background"; }
+bool starts_at_sign_in() {
+    wxRegKey key(kRunKey);
+    return key.Exists() && key.HasValue(kRunValue);
+}
+void set_start_at_sign_in(bool on) {
+    wxRegKey key(kRunKey);
+    if (on) {
+        if (!key.Exists()) key.Create();
+        key.SetValue(kRunValue, run_command());
+    } else if (key.Exists() && key.HasValue(kRunValue)) {
+        key.DeleteValue(kRunValue);
+    }
+}
+#endif
 
 wxString size_text(std::int64_t bytes) { return wxFileName::GetHumanReadableSize(wxULongLong(bytes), "0 B", 1); }
 
@@ -117,6 +146,17 @@ MainFrame::MainFrame(Store& store)
     const auto browse = wxWindow::NewControlId();
     app_menu->Append(browse, wxS("Browse files…"));
     app_menu->Append(wxID_REFRESH, "Sync now");
+#ifdef __WXMSW__
+    const auto autostart = wxWindow::NewControlId();
+    app_menu->AppendCheckItem(autostart, "Start at sign-in");
+    // Keep the entry pointing at this copy, in case the app was moved since it was set.
+    if (starts_at_sign_in()) set_start_at_sign_in(true);
+    app_menu->Check(autostart, starts_at_sign_in());
+    Bind(wxEVT_MENU, [this, autostart](wxCommandEvent& e) {
+        set_start_at_sign_in(e.IsChecked());
+        GetMenuBar()->Check(autostart, starts_at_sign_in());
+    }, autostart);
+#endif
     app_menu->AppendSeparator();
     app_menu->Append(wxID_EXIT, "Quit");
     menus->Append(app_menu, "&More");
@@ -232,6 +272,16 @@ wxPanel* MainFrame::BuildConnect(wxWindow* parent) {
     row->Add(continue_);
     column->Add(row, 0, wxEXPAND | wxBOTTOM, FromDIP(16));
     server_->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { OnContinue(); });
+    http_warning_ = new wxStaticText(page, wxID_ANY, kPlainHttpWarning);
+    http_warning_->SetForegroundColour(wxColour(200, 70, 60));
+    http_warning_->Wrap(FromDIP(620));
+    http_warning_->Hide();
+    column->Add(http_warning_, 0, wxBOTTOM, FromDIP(12));
+    server_->Bind(wxEVT_TEXT, [this, page](wxCommandEvent& e) {
+        http_warning_->Show(plain_http(server_->GetValue()));
+        page->Layout();
+        e.Skip();
+    });
     continue_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { OnContinue(); });
 
     // Sign-in choices, shown once the server answers.
