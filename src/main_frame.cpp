@@ -592,7 +592,8 @@ void MainFrame::OnChooseLocal() {
                        current ? wxString(current->local.wstring()) : wxString());
     if (dialog.ShowModal() != wxID_OK) return;
     const std::filesystem::path chosen = dialog.GetPath().ToStdWstring();
-    if (current && current->local != chosen) store_.remove_mapping(*id);  // A new place starts a fresh index.
+    // A new place starts a fresh index, including one left by an earlier mapping.
+    if (!current || current->local != chosen) store_.remove_mapping(*id);
     store_.save_mapping({*id, chosen});
     WatchFolders();
     Populate();

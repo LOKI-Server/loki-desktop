@@ -2,6 +2,7 @@
 // The signed-in account and folder mappings, kept as JSON in the user's config folder.
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -42,6 +43,13 @@ public:
     std::map<std::string, Mapping> mappings() const;
     std::optional<Mapping> mapping(const std::string& folder_id) const;
     void save_mapping(const Mapping& mapping);
+    /**
+     * Runs `block` only while `mapping` is still how its folder is synced (not
+     * stopped, moved, or signed out), so those cannot interleave with it.
+     */
+    bool while_current(const Mapping& mapping, const std::function<void()>& block);
+    /** Records a finished sync, unless the folder was stopped or moved meanwhile. */
+    bool record_result(const Mapping& mapping);
     void remove_mapping(const std::string& folder_id);
 
     std::filesystem::path index_file(const std::string& folder_id) const;

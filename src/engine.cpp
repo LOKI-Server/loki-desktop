@@ -172,8 +172,8 @@ Outcome Engine::sync(const Mapping& mapping) {
         outcome.errors.push_back(recorded.last_result);
     }
     recorded.last_sync = now_ms();
-    // The person may have stopped syncing this folder meanwhile.
-    if (store_.mapping(mapping.folder_id)) store_.save_mapping(recorded);
+    // The person may have stopped syncing this folder, or moved it, meanwhile.
+    store_.record_result(recorded);
     return outcome;
 }
 
@@ -188,6 +188,8 @@ Outcome Engine::sync_folder(const Mapping& mapping) {
     }
     const auto index_file = store_.index_file(mapping.folder_id);
     auto index = SyncIndex::load(index_file);
+    // Stopping, re-choosing, or signing out mid-sync deletes the index; never write it back.
+    const auto save_index = [&] { store_.while_current(mapping, [&] { index.save(index_file); }); };
     std::map<std::string, LocalFile> local;
     Run run{api, root, index, local, before_replace, {}};
 
@@ -261,7 +263,7 @@ Outcome Engine::sync_folder(const Mapping& mapping) {
         }
         since = feed.seq;
         index.cursor = since;
-        index.save(index_file);
+        save_index();
         if (!feed.more) break;
     }
     local = scan(root);
@@ -324,10 +326,10 @@ Outcome Engine::sync_folder(const Mapping& mapping) {
                         break;
                 }
             }
-            index.save(index_file);
+            save_index();
         }
     }
-    index.save(index_file);
+    save_index();
     return run.outcome;
 }
 

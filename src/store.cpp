@@ -154,6 +154,23 @@ void Store::save_mapping(const Mapping& mapping) {
     save();
 }
 
+bool Store::while_current(const Mapping& mapping, const std::function<void()>& block) {
+    std::lock_guard lock(mutex_);
+    const auto it = mappings_.find(mapping.folder_id);
+    if (it == mappings_.end() || it->second.local != mapping.local) return false;
+    block();
+    return true;
+}
+
+bool Store::record_result(const Mapping& mapping) {
+    std::lock_guard lock(mutex_);
+    const auto it = mappings_.find(mapping.folder_id);
+    if (it == mappings_.end() || it->second.local != mapping.local) return false;
+    it->second = mapping;
+    save();
+    return true;
+}
+
 void Store::remove_mapping(const std::string& folder_id) {
     std::lock_guard lock(mutex_);
     mappings_.erase(folder_id);
