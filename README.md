@@ -1,12 +1,18 @@
 # LOKI Client for desktop
 
-Keeps folders on a Windows, macOS, or Linux computer in step with a
+Keeps folders on a computer in step with a
 [LOKI](https://github.com/LOKI-Server/LOKI) server's **Save sync**. Typical uses:
 RetroArch or other emulator saves shared with a handheld, or PC game saves
 without cloud sync. Every earlier version stays on your server.
 
 C++20, wxWidgets for the native UI, libcurl for HTTP, and nlohmann/json, built
 with [xmake](https://xmake.io).
+
+Releases are built for **Windows (x64)**: download the ZIP, extract it
+anywhere, and run `loki-client.exe`. Nothing needs installing; the Microsoft C++
+runtime is included. The executable is not code-signed yet, so Windows may show a
+SmartScreen prompt the first time (**More info → Run anyway**). The code is
+portable to macOS and Linux, but those builds are not tested or released yet.
 
 ## Using it
 
@@ -17,8 +23,9 @@ with [xmake](https://xmake.io).
 3. Select a server folder and choose **Choose local folder…**.
 
 LOKI Client syncs as soon as anything changes: it holds one request open to the server, which answers the moment another device changes a folder, and watches the mapped folders for local saves (waiting until a file has stopped changing). A 5-minute timer and **Sync now** cover anything else. Closing the
-window keeps it running in the notification area. Start it with `--background`
-to begin hidden there, for example at sign-in.
+window keeps it running in the notification area. On Windows, tick **More →
+Start at sign-in** to have it start hidden there each time you sign in (it runs
+with `--background`, which you can also use yourself).
 
 Settings and the per-folder index are kept in the user's application data
 folder (`%APPDATA%\LOKI Sync` on Windows, retained so the app rename preserves
@@ -80,6 +87,16 @@ On Windows this uses MSVC and prebuilt wxWidgets. Run it from PowerShell or a
 Developer Command Prompt rather than an MSYS shell, which mangles CMake paths
 while libcurl builds.
 
+To build the release ZIP (Windows, from PowerShell or a Developer Command Prompt):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package.ps1
+```
+
+It writes `dist/LOKI-Client-<version>-windows-x64.zip` containing the
+executable, only the wxWidgets DLLs it loads, the Visual C++ runtime DLLs,
+this README, and the license.
+
 On Windows the build copies the wxWidgets runtime DLLs beside
 `build/windows/x64/release/loki-client.exe` (or the selected architecture and
 mode). You can launch it directly from Explorer. When moving the application
@@ -113,3 +130,7 @@ python tests/files_fixture.py
 This covers file browsing, URL encoding, checksum verification, resume, full
 responses to range requests, rejected ranges, interrupted transfers, empty files,
 cancellation, and revoked/forbidden credentials.
+
+## License
+
+MIT © Aspenini. See [LICENSE](LICENSE).

@@ -3,3 +3,4 @@ build/
 vsxmake*/
 .vs/
 compile_commands.json
+dist/
