@@ -2,6 +2,7 @@
 #include <wx/wx.h>
 #include <wx/fswatcher.h>
 #include <wx/listctrl.h>
+#include <wx/listbox.h>
 #include <wx/simplebook.h>
 #include <wx/taskbar.h>
 
@@ -11,6 +12,7 @@
 #include <optional>
 
 #include "api.hpp"
+#include "desktop.hpp"
 #include "store.hpp"
 
 namespace loki {
@@ -41,13 +43,16 @@ private:
 
     wxPanel* BuildConnect(wxWindow* parent);
     wxPanel* BuildFolders(wxWindow* parent);
+    wxPanel* BuildWorkspace(wxWindow* parent);
+    void OpenPage(int index);
     void ShowConnectStep();
 
     void OnContinue();
     void OnPair();
-    void PollPairing(Pairing pairing, long long deadline);
+    void PollPairing(SignIn pairing);
     void OnLogin();
-    void FinishSignIn(const std::string& server, const Session& session);
+    void ProfileChanged();
+    void ShowSession();
 
     /** (Re)starts the server watch for the signed-in account. */
     void StartWatching();
@@ -72,8 +77,13 @@ private:
     std::shared_ptr<std::atomic<bool>> watching_;
 
     wxSimplebook* book_ = nullptr;
+    wxSimplebook* pages_ = nullptr;
+    wxListBox* navigation_ = nullptr;
+    wxStaticText* profile_label_ = nullptr;
     wxTimer timer_;
     wxTimer settle_;
+    std::string profile_token_;
+    std::map<std::string, Mapping> shown_mappings_;
     std::unique_ptr<wxFileSystemWatcher> files_;
     std::unique_ptr<wxTaskBarIcon> tray_;
 

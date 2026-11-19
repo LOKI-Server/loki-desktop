@@ -12,6 +12,7 @@
 #include "index.hpp"
 #include "sha256.hpp"
 #include "files_api.hpp"
+#include "apps_api.hpp"
 
 namespace fs = std::filesystem;
 using namespace loki;
@@ -112,6 +113,38 @@ static void file_sessions() {
     fs::remove_all(dir);
 }
 
+static void shared_profile() {
+    const auto dir = scratch("shared-profile");
+    Store gui(dir), cli(dir);
+    gui.sign_in("https://loki.example", {"old-token","old-id","alice","Alice",true,"repositories"});
+    CHECK(cli.session().scope == "repositories");
+    auto first = std::async(std::launch::async, [&] { gui.save_mapping({"first", dir / "a"}); });
+    auto second = std::async(std::launch::async, [&] { cli.save_mapping({"second", dir / "b"}); });
+    first.get();
+    second.get();
+    CHECK(gui.mappings().size() == 2);
+    CHECK(cli.mappings().size() == 2);
+    cli.sign_in("https://loki.example", {"new-token","new-id","alice","Alice",true,"owner"}, "old-token");
+    CHECK(gui.token() == "new-token");
+    CHECK(gui.session().scope == "owner");
+    try { gui.sign_out("old-token"); CHECK(false); }
+    catch (const std::runtime_error&) {}
+    CHECK(cli.mappings().size() == 2);
+    Store git(dir / "git", Profile::Git);
+    git.sign_in("https://elsewhere.example", {"git-token","git-id","bob","Bob",false,"repositories"});
+    CHECK(gui.token() == "new-token");
+    CHECK(git.mappings().empty());
+    try { Store wrong(dir, Profile::Git); CHECK(false); }
+    catch (const std::runtime_error&) {}
+    try { Store wrong(git.directory(), Profile::Desktop); CHECK(false); }
+    catch (const std::runtime_error&) {}
+    git.sign_out();
+    CHECK(gui.signed_in());
+    cli.sign_out("new-token");
+    CHECK(!gui.signed_in() && gui.mappings().empty());
+    fs::remove_all(dir);
+}
+
 /** Exercises the Files API against the local HTTP test fixture. */
 static void shared_files(const std::string& server) {
     FilesApi public_api(server);
@@ -130,6 +163,25 @@ static void shared_files(const std::string& server) {
     account.sign_in(server,session);
     CHECK(account.files_api().shares().at(0).name == "Archive");
     CHECK(account.api().sync_access()); // The same saved credential serves both APIs.
+    AppDownloads apps(account);
+    auto catalog = apps.catalog();
+    CHECK(catalog.errors.empty() && catalog.apps.size() == 1);
+    auto app = catalog.apps.at(0);
+    CHECK(app.build.has_value() && app.downloaded.empty());
+    const auto install = [&](const AvailableApp& entry) {
+        return apps.download(entry, [](auto, auto) { return true; }, [] { return true; });
+    };
+    const auto package = install(app);
+    CHECK(read(package) == "old");
+    CHECK(!apps.catalog().apps.at(0).update);
+    // The fixture publishes another build at the same path, size and modified date.
+    api.sign_out();
+    app = apps.catalog().apps.at(0);
+    CHECK(app.downloaded == package && app.update);
+    CHECK(install(app) == package);
+    CHECK(read(package) == "new");
+    CHECK(!apps.catalog().apps.at(0).update);
+
     const auto original = api.download("archive","日本語 + #.bin",dir,[](auto,auto) { return true; });
     const auto contents = read(original);
     CHECK(!contents.empty());
@@ -283,6 +335,7 @@ int main() try {
     indexes();
     naming();
     file_sessions();
+    shared_profile();
     if (const auto* fixture = std::getenv("LOKI_FILES_TEST_SERVER")) shared_files(fixture);
     const char* server = std::getenv("LOKI_TEST_SERVER");
     const char* user = std::getenv("LOKI_TEST_USER");

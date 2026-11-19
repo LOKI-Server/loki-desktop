@@ -113,6 +113,33 @@ std::vector<Share> FilesApi::shares() {
     for (const auto& s : o.at("shares")) out.push_back({s.at("id"),s.at("name")});
     return out;
 }
+std::vector<Share> FilesApi::app_repositories() {
+    try {
+        const auto result = json::parse(api_.ok("GET", "/files/v1/app-repositories"));
+        std::vector<Share> repositories;
+        for (const auto& share : result.at("shares")) repositories.push_back({share.at("id"), share.at("name")});
+        return repositories;
+    } catch (const ApiError& error) {
+        if (error.status != 404) throw;
+        throw std::runtime_error("App repositories require a newer LOKI server.");
+    } catch (const json::parse_error&) {
+        throw std::runtime_error("App repositories require a newer LOKI server.");
+    }
+}
+
+std::vector<PublishedApp> FilesApi::catalog(const std::string& share) {
+    const auto result = json::parse(api_.ok("GET", "/files/v1/app-repositories/" + enc(share)));
+    std::vector<PublishedApp> apps;
+    for (const auto& entry : result.at("apps")) {
+        PublishedApp app{entry.at("id"), entry.at("name"), {}, {}};
+        if (entry.at("version").is_string()) app.version = entry.at("version");
+        for (const auto& [platform, build] : entry.at("builds").items())
+            app.builds.emplace(platform, AppBuild{build.at("path"), build.at("name"), build.at("size")});
+        apps.push_back(std::move(app));
+    }
+    return apps;
+}
+
 ShareListing FilesApi::entries(const std::string& share, const std::string& path, int page) {
     const auto o = json::parse(api_.ok("GET", route(share,"entries",path) + "&page=" + std::to_string(page)));
     ShareListing out{{},o.at("total"),o.at("page")};
@@ -127,9 +154,9 @@ FileMetadata FilesApi::metadata(const std::string& share, const std::string& pat
     return out;
 }
 fs::path FilesApi::download(const std::string& share, const std::string& path, const fs::path& cache,
-                         const std::function<bool(std::int64_t,std::int64_t)>& report) {
+                         const std::function<bool(std::int64_t,std::int64_t)>& report, const FileMetadata* expected) {
     if (!report(0, 0)) throw std::runtime_error("Download cancelled.");
-    const auto meta = metadata(share,path);
+    const auto meta = expected ? *expected : metadata(share,path);
     if (!report(0,meta.size)) throw std::runtime_error("Download cancelled.");
     fs::create_directories(cache);
     // A partial belongs to one server, share, path AND content version.

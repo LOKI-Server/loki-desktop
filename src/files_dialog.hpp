@@ -1,6 +1,8 @@
 #pragma once
-#include <wx/window.h>
-#include "store.hpp"
+class wxWindow;
+class wxPanel;
 namespace loki {
-void show_file_browser(wxWindow* parent, Store& store, const std::string& suggested_server);
+class Store;
+wxPanel* build_file_browser(wxWindow* parent, Store& store);
+void activate_file_browser(wxPanel* panel);
 }

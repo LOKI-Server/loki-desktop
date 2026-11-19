@@ -1,9 +1,15 @@
 #pragma once
 #include "api.hpp"
 #include <functional>
+#include <map>
 
 namespace loki {
 struct Share { std::string id, name; };
+struct AppBuild { std::string path, filename; std::int64_t size = 0; };
+struct PublishedApp {
+    std::string id, name, version;
+    std::map<std::string, AppBuild> builds;
+};
 struct ShareEntry {
     std::string name;
     bool directory = false;
@@ -28,13 +34,16 @@ public:
                   const std::string& device, const std::string& platform);
     void sign_out();
     std::vector<Share> shares();
+    std::vector<Share> app_repositories();
+    std::vector<PublishedApp> catalog(const std::string& share);
     ShareListing entries(const std::string& share, const std::string& path, int page = 0);
     FileMetadata metadata(const std::string& share, const std::string& path);
     /** Resume into a cache file; returns it only after size and SHA-256 verification.
      * Returning false from progress cancels, retaining the partial for retry. */
     std::filesystem::path download(const std::string& share, const std::string& path,
         const std::filesystem::path& cache,
-        const std::function<bool(std::int64_t, std::int64_t)>& progress);
+        const std::function<bool(std::int64_t, std::int64_t)>& progress,
+        const FileMetadata* expected = nullptr);
 private:
     Api api_;
     std::string token_;

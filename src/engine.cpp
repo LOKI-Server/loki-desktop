@@ -154,7 +154,10 @@ std::map<std::string, Outcome> Engine::sync_all() {
 
 Outcome Engine::sync(const Mapping& mapping) {
     std::lock_guard lock(sync_lock);
+    ProfileLock transaction(store_.directory() / "sync.lock");
     Outcome outcome;
+    const auto current = store_.mapping(mapping.folder_id);
+    if (!current || current->local != mapping.local) return outcome;
     auto recorded = mapping;
     try {
         outcome = sync_folder(mapping);

@@ -1,5 +1,5 @@
 # Builds LOKI Client in release mode and packs a portable Windows ZIP:
-# the executable, only the wxWidgets DLLs it actually loads, the Microsoft C++
+# the GUI and CLI executables, their runtime DLLs, the Microsoft C++
 # runtime (app-local, so no redistributable install is needed), README and LICENSE.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\package.ps1
@@ -11,12 +11,13 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 $version = (Select-String -Path xmake.lua -Pattern 'set_version\("([^"]+)"\)').Matches[0].Groups[1].Value
-xmake f -y -p windows -a $Arch -m release
+xmake f -y -p windows -a $Arch -m release --gui=y
 if ($LASTEXITCODE -ne 0) { throw "xmake configure failed" }
-xmake build -y loki-sync
+xmake build -y
 if ($LASTEXITCODE -ne 0) { throw "xmake build failed" }
 $build = Join-Path $root "build\windows\$Arch\release"
 $exe = Join-Path $build "loki-client.exe"
+$cli = Join-Path $build "loki-git.exe"
 
 # The DLL names a PE file imports, read straight from its import directory.
 function Get-Imports([string]$Path) {
@@ -51,6 +52,7 @@ function Get-Imports([string]$Path) {
 $needed = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $queue = [Collections.Generic.Queue[string]]::new()
 $queue.Enqueue($exe)
+$queue.Enqueue($cli)
 $runtime = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 while ($queue.Count -gt 0) {
     foreach ($dll in Get-Imports $queue.Dequeue()) {
@@ -71,9 +73,20 @@ if (-not $crt) { throw "No Visual C++ redistributable found; install the C++ wor
 $name = "LOKI-Client-$version-windows-$Arch"
 $dist = Join-Path $root "dist"
 $stage = Join-Path $dist $name
-if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+if (Test-Path -LiteralPath $stage) {
+    $resolvedStage = (Resolve-Path -LiteralPath $stage).Path
+    $expectedDist = [IO.Path]::GetFullPath($dist).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $distDir = Get-Item -LiteralPath $expectedDist
+    $stageDir = Get-Item -LiteralPath $resolvedStage
+    if ((Split-Path -Parent $resolvedStage) -ne $expectedDist -or
+        ($distDir.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        ($stageDir.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "The package staging directory must be inside the project's dist directory."
+    }
+    Remove-Item -LiteralPath $resolvedStage -Recurse -Force
+}
 New-Item -ItemType Directory -Force $stage | Out-Null
-Copy-Item $exe $stage
+Copy-Item $exe, $cli $stage
 foreach ($dll in $needed) { Copy-Item (Join-Path $build $dll) $stage }
 foreach ($dll in $runtime) {
     $source = Join-Path $crt $dll

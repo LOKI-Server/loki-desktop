@@ -5,6 +5,7 @@ from pathlib import Path
 payload=bytes(range(251))*4096
 errors=[]
 logins=0
+app_updated=False
 class Handler(http.server.BaseHTTPRequestHandler):
  def log_message(self,*args): pass
  def send_json(self,status,value):
@@ -16,7 +17,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
   data=json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))))
   if self.path!='/auth/v1/login' or data.get('username')!='reader': errors.append('Unexpected login')
   self.send_json(200,{'token':'download-token','device':{'id':'desktop'},'user':{'username':'reader','display_name':'Reader'},'access':{'sync':True}})
- def do_DELETE(self): self.send_json(200,{'ok':True})
+ def do_DELETE(self):
+  global app_updated
+  if self.path=="/auth/v1/device": app_updated=True
+  self.send_json(200,{'ok':True})
  def do_GET(self):
   url=urllib.parse.urlsplit(self.path); query=urllib.parse.parse_qs(url.query,keep_blank_values=True);path=query.get('path',[''])[0]
   if url.path=='/legacy/files/v1': self.send_json(200,'Legacy LOKI page');return
@@ -25,10 +29,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
   if path=='forbidden': self.send_json(403,{'error':'Access revoked.','code':'forbidden'});return
   if url.path=='/auth/v1/me': self.send_json(200,{'access':{'sync':True}});return
   if url.path=='/files/v1/shares': self.send_json(200,{'shares':[{'id':'archive','name':'Archive'}]});return
+  if url.path=='/files/v1/app-repositories': self.send_json(200,{'shares':[{'id':'builds','name':'Builds'}]});return
+  if url.path=='/files/v1/app-repositories/builds':
+   build={'path':'Game/game.zip','name':'game.zip','size':3}
+   self.send_json(200,{'apps':[{'id':'Game','name':'Game','version':None,'builds':{platform:build for platform in ['windows','macos','linux']}}]});return
   if url.path.endswith('/entries'):
    if path!='Games/日本語 + #' or query.get('page')!=['1']: errors.append('Path or page encoding failed: '+path)
    self.send_json(200,{'entries':[{'name':'日本語 + #.bin','directory':False,'size':len(payload),'modified':1793836800}],'total':101,'page':1});return
-  data=b'' if path=='empty' else payload
+  data=(b'new' if app_updated else b'old') if path=='Game/game.zip' else b'' if path=='empty' else payload
   if url.path.endswith('/metadata'):
    self.send_json(200,{'size':len(data),'sha256':'0'*64 if path=='badHash' else hashlib.sha256(data).hexdigest(),'last_modified':'Thu, 05 Nov 2026 00:00:00 GMT'});return
   if url.path.endswith('/file'):

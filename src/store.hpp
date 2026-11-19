@@ -12,6 +12,24 @@
 
 namespace loki {
 class FilesApi;
+enum class Profile { Desktop, Git };
+std::filesystem::path user_directory(Profile profile);
+std::filesystem::path path_from_utf8(const std::string& text);
+std::string path_utf8(const std::filesystem::path& path);
+
+class ProfileLock {
+public:
+    explicit ProfileLock(const std::filesystem::path& path);
+    ~ProfileLock();
+    ProfileLock(const ProfileLock&) = delete;
+    ProfileLock& operator=(const ProfileLock&) = delete;
+private:
+#ifdef _WIN32
+    void* handle_ = nullptr;
+#else
+    int fd_ = -1;
+#endif
+};
 
 /** Where a server folder lives on this computer, and how its last sync went. */
 struct Mapping {
@@ -20,12 +38,15 @@ struct Mapping {
     std::int64_t last_sync = 0;  // Unix milliseconds
     std::string last_result;
     bool failed = false;
+    bool operator==(const Mapping&) const = default;
 };
+
+struct StoredAccount { std::string server; Session session; };
 
 class Store {
 public:
     /** Loads (or starts) the configuration kept in `directory`. */
-    explicit Store(std::filesystem::path directory);
+    explicit Store(std::filesystem::path directory, Profile profile = Profile::Desktop);
 
     std::string server() const;
     std::string token() const;
@@ -33,12 +54,13 @@ public:
     bool signed_in() const;
     bool can_sync() const;
     Session session() const;
+    StoredAccount account() const;
     Api api() const;
     FilesApi files_api() const;
     void set_sync_access(bool allowed);
 
-    void sign_in(const std::string& server, const Session& session);
-    void sign_out();
+    void sign_in(const std::string& server, const Session& session, const std::optional<std::string>& expected = {});
+    void sign_out(const std::optional<std::string>& expected = {});
 
     std::map<std::string, Mapping> mappings() const;
     std::optional<Mapping> mapping(const std::string& folder_id) const;
@@ -54,15 +76,18 @@ public:
 
     std::filesystem::path index_file(const std::string& folder_id) const;
     const std::filesystem::path& directory() const { return directory_; }
+    Profile profile() const { return profile_; }
 
 private:
+    void load() const;
     void save() const;
 
     std::filesystem::path directory_;
+    Profile profile_;
     mutable std::mutex mutex_;
-    std::string server_, token_, username_, display_name_;
-    bool can_sync_ = true;
-    std::map<std::string, Mapping> mappings_;
+    mutable std::string server_, token_, username_, display_name_, device_id_, scope_;
+    mutable bool can_sync_ = true;
+    mutable std::map<std::string, Mapping> mappings_;
 };
 
 /** Writes `text` to `file` through a temporary file, so a crash never leaves half a file. */

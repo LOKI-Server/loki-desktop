@@ -18,7 +18,7 @@ public:
         // logins survive the rename and an older client cannot run alongside us.
         SetAppName("LOKI Sync");
         SetVendorName("LOKI");
-        const std::filesystem::path config = wxStandardPaths::Get().GetUserDataDir().ToStdWstring();
+        const auto config = loki::user_directory(loki::Profile::Desktop);
         single_ = std::make_unique<wxSingleInstanceChecker>();
         SetAppName("LOKI Client");
         SetAppDisplayName("LOKI Client");

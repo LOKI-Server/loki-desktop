@@ -11,24 +11,47 @@ set_languages("c++20")
 add_rules("mode.debug", "mode.release")
 set_defaultmode("release")
 
-add_requires("wxwidgets", "libcurl", "nlohmann_json")
+option("gui")
+    set_default(true)
+    set_showmenu(true)
+    set_description("Build the wxWidgets desktop frontend")
+option_end()
+
+add_requires("libcurl", "nlohmann_json")
+if has_config("gui") then
+    add_requires("wxwidgets")
+end
 
 -- Everything except the GUI, so tests can link it without wxWidgets.
 target("loki-core")
     set_kind("static")
-    add_files("src/api.cpp", "src/files_api.cpp", "src/engine.cpp", "src/index.cpp", "src/sha256.cpp", "src/store.cpp")
+    add_files("src/api.cpp", "src/files_api.cpp", "src/engine.cpp", "src/index.cpp", "src/sha256.cpp", "src/store.cpp",
+              "src/management_api.cpp", "src/process.cpp", "src/desktop.cpp", "src/commands.cpp", "src/apps_api.cpp")
     add_includedirs("src", {public = true})
     add_packages("libcurl", "nlohmann_json", {public = true})
     if is_plat("windows") then
         add_defines("NOMINMAX", "WIN32_LEAN_AND_MEAN")
-        add_cxflags("/utf-8", {public = true})
+        add_syslinks("crypt32", "advapi32", {public = true})
+        add_cxflags("/utf-8", {public = true, tools = {"cl", "clang_cl"}})
     end
 
+target("loki-git")
+    set_kind("binary")
+    set_basename("loki-git")
+    add_deps("loki-core")
+    add_files("src/cli.cpp")
+    if is_plat("windows") then
+        add_defines("NOMINMAX", "WIN32_LEAN_AND_MEAN")
+        add_syslinks("crypt32")
+        add_ldflags("-municode", {tools = {"gcc", "gxx"}})
+    end
+
+if has_config("gui") then
 target("loki-sync")
     set_kind("binary")
     set_basename("loki-client")
     add_deps("loki-core")
-    add_files("src/app.cpp", "src/main_frame.cpp", "src/files_dialog.cpp")
+    add_files("src/app.cpp", "src/main_frame.cpp", "src/files_dialog.cpp", "src/workspace_pages.cpp")
     add_packages("wxwidgets")
     if is_plat("windows") then
         add_rules("win.sdk.application")
@@ -46,6 +69,8 @@ target("loki-sync")
             end
         end)
     end
+
+end
 
 target("loki-sync-tests")
     set_kind("binary")

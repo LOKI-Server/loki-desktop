@@ -30,6 +30,7 @@ struct Pairing {
 struct Session {
     std::string token, device_id, username, display_name;
     bool can_sync = true;
+    std::string scope;
 };
 struct Folder {
     std::string id, name, kind;
@@ -105,6 +106,7 @@ public:
 
 private:
     friend class FilesApi;
+    friend class ManagementApi;
     struct Response {
         long status = 0;
         std::string body;

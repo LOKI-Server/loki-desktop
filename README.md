@@ -1,7 +1,6 @@
 # LOKI Client for desktop
 
-Keeps folders on a computer in step with a
-[LOKI](https://github.com/LOKI-Server/LOKI) server's **Save sync**. Typical uses:
+The native desktop client for [LOKI](https://github.com/LOKI-Server/LOKI). Browse files, download and update app builds, work with private Git repositories, and keep local folders in step with **Save Sync**. Typical uses:
 RetroArch or other emulator saves shared with a handheld, or PC game saves
 without cloud sync. Every earlier version stays on your server.
 
@@ -14,13 +13,49 @@ runtime is included. The executable is not code-signed yet, so Windows may show 
 SmartScreen prompt the first time (**More info → Run anyway**). The code is
 portable to macOS and Linux, but those builds are not tested or released yet.
 
+## Git on desktop
+
+The Windows ZIP includes `loki-client.exe` for the GUI and `loki-git.exe` for
+the terminal. Both use the same C++ core for sign-in and Git. Build only the
+Git CLI with `xmake f --gui=n` and `xmake build loki-git`; use
+`xmake f --gui=y` to build both frontends.
+
+```sh
+loki-git auth login https://loki.example.com
+loki-git repo list
+loki-git repo create my-game --push
+loki-git repo clone my-game
+```
+
+Approve the pairing code in the LOKI dashboard, or use
+`loki-git auth login SERVER --password-stdin USERNAME`. With `--mfa`, provide
+the password and MFA code on separate input lines. Both frontends support
+creating, viewing, pushing, and cloning repositories. In the GUI, open
+the **Git** page and select a repository or publish a local worktree. The page shows the current branch and changes, and supports commits, fetch, fast-forward pull and push.
+If an existing GUI login only grants Save Sync and shared files, use
+**More → Reconnect to LOKI** to grant Git access for the same account.
+
+Run `repo create --push` from a Git worktree with a commit. It creates a
+private repo, adds the `loki` remote, and pushes the current branch and any
+LFS assets. Install Git and run `git lfs install` for projects with LFS files.
+Use `--remote NAME` for a different local remote or `--branch NAME` for a
+different server branch.
+
+The frontends save separate sign-ins and local state. On Windows the GUI uses
+`%APPDATA%\LOKI Sync`, and `loki-git` reuses the previous CLI's
+`%APPDATA%\LOKI\CLI` directory. Override them independently with
+`LOKI_DESKTOP_CONFIG_DIR` and `LOKI_GIT_CONFIG_DIR`. For Git automation, pass
+a paired Git API credential through `LOKI_TOKEN` and its server origin through
+`LOKI_SERVER`. Server administration is documented separately in the server's
+`docs/management-api.md`.
+
 ## Using it
 
 1. In the LOKI dashboard, the owner grants **Save sync** to you.
 2. Start LOKI Client, enter your server address, and choose **Pair with a code**.
    Approve the code in the dashboard under **Account → Devices → Pair a device**, or
    sign in with a password.
-3. Select a server folder and choose **Choose local folder…**.
+3. Open **Sync**, select a server folder, and choose **Choose local folder…**.
 
 LOKI Client syncs as soon as anything changes: it holds one request open to the server, which answers the moment another device changes a folder, and watches the mapped folders for local saves (waiting until a file has stopped changing). A 5-minute timer and **Sync now** cover anything else. Closing the
 window keeps it running in the notification area. On Windows, tick **More →
@@ -33,19 +68,10 @@ existing settings and saved logins).
 
 ## Browse shared files
 
-Choose **More → Browse files…** in the app menu (also available in the tray menu).
-A native popup lists the file shares you can access. Double-click a share or
-folder to open it, use **Up** to go back, and use **Previous / Next** for larger
-folders. Select a file and choose **Download…**, then pick its destination in
-the Save As dialog.
-
-The popup reuses the app's saved LOKI login, including an existing code-paired
-login. There is no second sign-in for file browsing. When not signed in, signing
-in from the popup also connects the main app. One account device credential is
-used for both sync and file access; passwords are not saved. Existing standalone
-file credentials are migrated when no main account is saved. Each share's
-permissions still apply, and accounts without Save sync can use file browsing.
-The server must support LOKI 0.6.0's shared `/auth/v1` login.
+Choose **Browse** in the sidebar. Double-click a share or folder to open it,
+use **Up** to go back, and use **Previous / Next** for larger folders. Select
+a file and choose **Download…**, then pick its destination in the Save As
+dialog. Browse uses the desktop account and works for accounts without Save Sync.
 
 Downloads stream to a temporary file, are checked against the server's SHA-256,
 then saved to the chosen location. Existing destination files are replaced only
@@ -55,6 +81,16 @@ If the server sends a full response instead of a range, the partial is replaced.
 Downloaded files do not create sync mappings or upload anything to the server.
 **Account settings** opens the server account page, where **Devices** handles
 pairing, renaming, and revocation. Signing out of the app signs out both features.
+
+## Download and update apps
+
+**Apps** lists the app repositories shared with your account and selects the
+build for your OS. Choose **Download** to save a package or **Update** to get
+the latest build. **Check for updates** compares package checksums, so replacing
+a server file in place still shows an update. Packages are saved under the
+desktop profile. **Open download folder** opens the selected package's folder.
+LOKI verifies downloaded packages and leaves installation and launch to you.
+App catalogs require an updated LOKI server.
 
 ## How syncing works
 
@@ -94,7 +130,7 @@ powershell -ExecutionPolicy Bypass -File scripts\package.ps1
 ```
 
 It writes `dist/LOKI-Client-<version>-windows-x64.zip` containing the
-executable, only the wxWidgets DLLs it loads, the Visual C++ runtime DLLs,
+GUI and CLI executables, their runtime DLLs, the Visual C++ runtime DLLs,
 this README, and the license.
 
 On Windows the build copies the wxWidgets runtime DLLs beside
