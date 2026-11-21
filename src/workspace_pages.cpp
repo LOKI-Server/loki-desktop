@@ -4,6 +4,7 @@
 #include <wx/dirdlg.h>
 #include <wx/filename.h>
 #include <wx/listctrl.h>
+#include <wx/timer.h>
 #include <wx/utils.h>
 
 #include "apps_api.hpp"
@@ -79,6 +80,9 @@ protected:
                 if (!*alive) return;
                 busy_ = false;
                 if (session != session_ || session != store_.token()) {
+                    status_->SetLabel("");
+                    Controls();
+                    Layout();
                     if (refresh_queued_) { refresh_queued_ = false; RefreshData(); }
                     return;
                 }
@@ -270,6 +274,10 @@ public:
         details->Add(changes_, 1, wxEXPAND);
         columns->Add(details, 1, wxEXPAND);
         layout_->Add(columns, 1, wxEXPAND);
+        progress_ = new wxGauge(this, wxID_ANY, 100);
+        layout_->Add(progress_, 0, wxEXPAND | wxTOP, FromDIP(8));
+        progress_->Hide();
+        Bind(wxEVT_TIMER, [this](wxTimerEvent&) { progress_->Pulse(); }, progress_timer_.GetId());
         FinishLayout();
         Controls();
     }
@@ -327,6 +335,16 @@ private:
         pull_->Enable(working_tree);
         push_->Enable(working_tree && repo->role != "read");
         commit_->Enable(working_tree);
+        if (progress_->IsShown() != busy_) {
+            progress_->Show(busy_);
+            if (busy_) {
+                progress_->Pulse();
+                progress_timer_.Start(100);
+            } else {
+                progress_timer_.Stop();
+            }
+            Layout();
+        }
     }
 
     void ShowRepository() {
@@ -393,7 +411,9 @@ private:
     void Transfer(RepositoryTransfer transfer) {
         const auto* repo = Selected();
         if (!repo || folder_.empty()) return;
-        Work(wxS("Transferring repository data…"),
+        const auto working = transfer == RepositoryTransfer::Fetch ? wxS("Fetching repository data…")
+            : transfer == RepositoryTransfer::Pull ? wxS("Pulling repository changes…") : wxS("Pushing repository changes…");
+        Work(working,
              [directory = store_.directory(), id = repo->id, folder = folder_, transfer] {
             Store store(directory);
             transfer_repository(store, id, folder, transfer);
@@ -414,6 +434,8 @@ private:
     wxStaticText* heading_;
     wxTextCtrl *folder_label_, *changes_;
     wxButton *refresh_, *create_, *publish_, *clone_, *link_, *open_, *fetch_, *pull_, *push_, *commit_;
+    wxGauge* progress_;
+    wxTimer progress_timer_{this};
     std::vector<HostedRepository> repositories_;
     fs::path folder_;
 };

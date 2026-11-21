@@ -4,6 +4,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <string_view>
 #include "management_api.hpp"
 #ifdef LOKI_HAS_SKALD
 #include <skald_vcs.h>
@@ -105,6 +106,22 @@ void require_local_branch(const SkaldHandle& workspace, const std::string& branc
         throw std::runtime_error("The local Skald branch " + branch + " needs a commit before it can be pushed.");
 }
 
+void push_workspace(const SkaldHandle& workspace, const std::string& remote,
+                    const std::string& token, const std::string& branch) {
+    const auto code = skald_push(workspace.get(), remote.c_str(), token.c_str(), branch.c_str(), 0, 0);
+    if (code != SKALD_OK) {
+        const auto* error = skald_last_error();
+        if (error && std::string_view(error) == "remote returned 507 Insufficient Storage") {
+            throw std::runtime_error(
+                "The server refused the push (507 Insufficient Storage). Your local commit is safe. "
+                "Ask the server owner to check the repository and total quotas under Server settings > Skald storage, "
+                "and check free disk space on the server. The repository object limit can also cause this error. "
+                "You can retry Push after the storage issue is resolved.");
+        }
+        check_skald(code);
+    }
+}
+
 std::string repository_url(const ManagementApi& api, const json& repo) {
     const auto id = repo.at("id").get<std::string>();
     ManagementApi::repo_path(id);
@@ -177,7 +194,7 @@ std::string create_hosted_repository(Store& store, const std::string& name, cons
         const auto url = repository_url(api, repo);
         const auto token = transfer_token(api, repo, url, true);
         check_skald(skald_remote(workspace.get(), "loki", url.c_str()));
-        check_skald(skald_push(workspace.get(), "loki", token.c_str(), branch.c_str(), 0, 0));
+        push_workspace(workspace, "loki", token, branch);
     } catch (const std::exception& error) {
         throw std::runtime_error("Repository created. Refresh Repositories, select it, and retry Push. " + std::string(error.what()));
     }
@@ -213,7 +230,7 @@ void transfer_repository(Store& store, const std::string& id, const fs::path& fo
     if (transfer == RepositoryTransfer::Push) {
         const auto branch = current_branch(workspace);
         require_local_branch(workspace, branch);
-        check_skald(skald_push(workspace.get(), remote.c_str(), token.c_str(), branch.c_str(), 0, 0));
+        push_workspace(workspace, remote, token, branch);
     } else if (transfer == RepositoryTransfer::Fetch) {
         SkaldOutput result;
         check_skald(skald_fetch(workspace.get(), remote.c_str(), token.c_str(), result.out()));
