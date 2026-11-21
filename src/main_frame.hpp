@@ -12,6 +12,7 @@
 #include <optional>
 
 #include "api.hpp"
+#include "client_update.hpp"
 #include "desktop.hpp"
 #include "store.hpp"
 
@@ -40,6 +41,18 @@ public:
 private:
     // Runs `job` on a worker thread, then `done` on the UI thread with its error, if any.
     void Background(std::function<void()> job, std::function<void(std::optional<std::string>)> done);
+
+#if defined(_WIN32) && defined(LOKI_HAS_SKALD)
+    void CheckClientUpdates(bool manual);
+    void OfferClientUpdate(bool manual);
+    void TryInstallClientUpdate();
+    wxTimer updates_{this};
+    std::optional<ClientUpdate> available_update_;
+    std::shared_ptr<PreparedClientUpdate> prepared_update_;
+    std::string offered_version_;
+    int update_menu_id_ = wxID_NONE;
+    bool checking_updates_ = false;
+#endif
 
     wxPanel* BuildConnect(wxWindow* parent);
     wxPanel* BuildFolders(wxWindow* parent);

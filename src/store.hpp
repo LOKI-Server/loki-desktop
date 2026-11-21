@@ -12,8 +12,7 @@
 
 namespace loki {
 class FilesApi;
-enum class Profile { Desktop, Git };
-std::filesystem::path user_directory(Profile profile);
+std::filesystem::path user_directory();
 std::filesystem::path path_from_utf8(const std::string& text);
 std::string path_utf8(const std::filesystem::path& path);
 
@@ -46,7 +45,7 @@ struct StoredAccount { std::string server; Session session; };
 class Store {
 public:
     /** Loads (or starts) the configuration kept in `directory`. */
-    explicit Store(std::filesystem::path directory, Profile profile = Profile::Desktop);
+    explicit Store(std::filesystem::path directory);
 
     std::string server() const;
     std::string token() const;
@@ -76,14 +75,12 @@ public:
 
     std::filesystem::path index_file(const std::string& folder_id) const;
     const std::filesystem::path& directory() const { return directory_; }
-    Profile profile() const { return profile_; }
 
 private:
     void load() const;
     void save() const;
 
     std::filesystem::path directory_;
-    Profile profile_;
     mutable std::mutex mutex_;
     mutable std::string server_, token_, username_, display_name_, device_id_, scope_;
     mutable bool can_sync_ = true;

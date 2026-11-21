@@ -20,21 +20,19 @@ constexpr auto platform = "macOS";
 constexpr auto platform = "Linux";
 #endif
 
-std::string scope_for(const std::string& server, bool required) {
+std::string scope_for(const std::string& server) {
     try {
         ManagementApi::origin(server);
     } catch (const std::runtime_error&) {
-        if (required) throw;
         return {};
     }
     try {
         ManagementApi(server).request("GET", "/api/v1");
     } catch (const ApiError& error) {
-        if (!required && error.status == 404) return {};
+        if (error.status == 404) return {};
         throw;
     } catch (const nlohmann::json::parse_error&) {
-        if (!required) return {};
-        throw;
+        return {};
     }
     return "repositories";
 }
@@ -42,7 +40,7 @@ std::string scope_for(const std::string& server, bool required) {
 }
 
 SignIn Desktop::pair(const std::string& address) {
-    const auto scope = scope_for(address, store_.profile() == Profile::Git);
+    const auto scope = scope_for(address);
     if (scope.empty()) {
         Api api(address);
         return {api.base(), scope, api.pair(device, platform)};
@@ -72,7 +70,7 @@ std::optional<Session> Desktop::wait(const SignIn& request, const std::function<
 
 void Desktop::login(const std::string& server, const std::string& username,
                     const std::string& password, const std::string& code) {
-    const auto scope = scope_for(server, store_.profile() == Profile::Git);
+    const auto scope = scope_for(server);
     const auto session = scope.empty() ? Api(server).login(username, password, code, device, platform)
         : ManagementApi(server).login(scope, username, password, code, device, platform);
     remember(server, session);
@@ -98,35 +96,12 @@ void Desktop::logout(bool local) {
         Api current(account.server, account.session.token);
         try { current.sign_out(); }
         catch (const ApiError& error) { if (error.status != 401) throw; }
-        if (store_.profile() == Profile::Desktop) {
-            const auto legacy = FileStore(store_.directory()).get();
-            if (!legacy.session.token.empty() && legacy.session.token != account.session.token) {
-                try { FilesApi(legacy.server, legacy.session.token).sign_out(); } catch (const std::exception&) {}
-            }
+        const auto legacy = FileStore(store_.directory()).get();
+        if (!legacy.session.token.empty() && legacy.session.token != account.session.token) {
+            try { FilesApi(legacy.server, legacy.session.token).sign_out(); } catch (const std::exception&) {}
         }
     }
     store_.sign_out(account.session.token);
-}
-
-nlohmann::json Desktop::status() {
-    const auto account = store_.account();
-    const auto& session = account.session;
-    if (session.token.empty()) throw std::runtime_error("Sign in to LOKI first.");
-    if (store_.profile() == Profile::Git) {
-        auto identity = ManagementApi(account.server, session.token).request("GET", "/api/v1/me");
-        identity["server"] = account.server;
-        return identity;
-    }
-    auto api = Api(account.server, session.token);
-    auto result = nlohmann::json{{"server", account.server},
-        {"user", {{"username", session.username}, {"display_name", session.display_name}}},
-        {"scope", session.scope.empty() ? "account" : session.scope}, {"sync", api.sync_access()}};
-    if (!session.scope.empty() || session.token.starts_with("loki_cli_")) {
-        const auto identity = ManagementApi(account.server, session.token).request("GET", "/api/v1/me");
-        result["scope"] = identity.at("scope");
-        result["user"] = identity.at("user");
-    }
-    return result;
 }
 
 void Desktop::watch(Api api, const std::function<bool()>& active, const std::function<void()>& changed, int wait) {

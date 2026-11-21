@@ -93,6 +93,8 @@ public:
 
     ~FilesPage() override { *alive_ = false; *cancelled_ = true; }
 
+    bool Busy() const { return busy_; }
+
     void Activate() {
         const auto token = account_.token();
         if (token == session_) return;
@@ -235,4 +237,5 @@ private:
 }
 wxPanel* build_file_browser(wxWindow* parent, Store& store) { return new FilesPage(parent, store); }
 void activate_file_browser(wxPanel* panel) { static_cast<FilesPage*>(panel)->Activate(); }
+bool file_browser_busy(const wxPanel* panel) { return static_cast<const FilesPage*>(panel)->Busy(); }
 } // namespace loki

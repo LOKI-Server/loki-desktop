@@ -13,6 +13,12 @@
 #include "sha256.hpp"
 #include "files_api.hpp"
 #include "apps_api.hpp"
+#include "commands.hpp"
+#include "client_update.hpp"
+#include <nlohmann/json.hpp>
+#ifdef LOKI_HAS_SKALD
+#include <skald_vcs.h>
+#endif
 
 namespace fs = std::filesystem;
 using namespace loki;
@@ -115,32 +121,27 @@ static void file_sessions() {
 
 static void shared_profile() {
     const auto dir = scratch("shared-profile");
-    Store gui(dir), cli(dir);
+    Store gui(dir), other(dir);
     gui.sign_in("https://loki.example", {"old-token","old-id","alice","Alice",true,"repositories"});
-    CHECK(cli.session().scope == "repositories");
+    CHECK(other.session().scope == "repositories");
     auto first = std::async(std::launch::async, [&] { gui.save_mapping({"first", dir / "a"}); });
-    auto second = std::async(std::launch::async, [&] { cli.save_mapping({"second", dir / "b"}); });
+    auto second = std::async(std::launch::async, [&] { other.save_mapping({"second", dir / "b"}); });
     first.get();
     second.get();
     CHECK(gui.mappings().size() == 2);
-    CHECK(cli.mappings().size() == 2);
-    cli.sign_in("https://loki.example", {"new-token","new-id","alice","Alice",true,"owner"}, "old-token");
+    CHECK(other.mappings().size() == 2);
+    other.sign_in("https://loki.example", {"new-token","new-id","alice","Alice",true,"owner"}, "old-token");
     CHECK(gui.token() == "new-token");
     CHECK(gui.session().scope == "owner");
     try { gui.sign_out("old-token"); CHECK(false); }
     catch (const std::runtime_error&) {}
-    CHECK(cli.mappings().size() == 2);
-    Store git(dir / "git", Profile::Git);
-    git.sign_in("https://elsewhere.example", {"git-token","git-id","bob","Bob",false,"repositories"});
-    CHECK(gui.token() == "new-token");
-    CHECK(git.mappings().empty());
-    try { Store wrong(dir, Profile::Git); CHECK(false); }
+    CHECK(other.mappings().size() == 2);
+    const auto legacy = dir / "legacy";
+    write(legacy / "config.json", R"({"profile":"git"})");
+    try { Store wrong(legacy); CHECK(false); }
     catch (const std::runtime_error&) {}
-    try { Store wrong(git.directory(), Profile::Desktop); CHECK(false); }
-    catch (const std::runtime_error&) {}
-    git.sign_out();
     CHECK(gui.signed_in());
-    cli.sign_out("new-token");
+    other.sign_out("new-token");
     CHECK(!gui.signed_in() && gui.mappings().empty());
     fs::remove_all(dir);
 }
@@ -330,7 +331,59 @@ static void two_devices(const std::string& server, const std::string& user, cons
     fs::remove_all(home_b);
 }
 
+#ifdef LOKI_HAS_SKALD
+static void skald_working_copy() {
+    const auto directory = scratch("skald");
+    const auto folder = directory / "worktree";
+    SkaldRepo* repo = nullptr;
+    if (skald_init(path_utf8(folder).c_str(), &repo) != SKALD_OK)
+        throw std::runtime_error(skald_last_error());
+    skald_repo_free(repo);
+
+    const auto nested = folder / "assets";
+    write(nested / "level.txt", "map data");
+    CHECK(repository_status(nested).find("assets/level.txt") != std::string::npos);
+    commit_repository_changes(nested, "Add level", "Desktop Tester");
+    CHECK(repository_status(nested).find("Working copy is clean.") != std::string::npos);
+
+    Store store(directory / "profile");
+    const auto* id = "01234567-89ab-cdef-0123-456789abcdef";
+    link_repository_folder(store, id, nested);
+    CHECK(fs::equivalent(repository_folder(store, id), folder));
+    fs::remove_all(directory);
+}
+#endif
+
+static void client_update_metadata() {
+    auto release = nlohmann::json{
+        {"tag_name", "v0.10.0"}, {"draft", false}, {"prerelease", false},
+        {"assets", nlohmann::json::array({{
+            {"name", "LOKI-Client-0.10.0-windows-x64.zip"},
+            {"size", 512}, {"digest", "sha256:" + std::string(64, 'a')},
+            {"browser_download_url", "https://github.com/LOKI-Server/loki-desktop/releases/download/v0.10.0/LOKI-Client-0.10.0-windows-x64.zip"}
+        }})}
+    };
+    const auto update = select_client_update(release.dump(), "0.2.0");
+    CHECK(update && update->version == "0.10.0" && update->size == 512);
+    CHECK(!select_client_update(release.dump(), "0.10.1"));
+    release["prerelease"] = true;
+    CHECK(!select_client_update(release.dump(), "0.2.0"));
+    release["prerelease"] = false;
+    auto& asset = release["assets"][0];
+    const auto url = asset["browser_download_url"];
+    asset["browser_download_url"] = "https://example.com/wrong.zip";
+    try { select_client_update(release.dump(), "0.2.0"); CHECK(false); }
+    catch (const std::runtime_error&) {}
+    asset["browser_download_url"] = url;
+    asset["digest"] = nullptr;
+    try { select_client_update(release.dump(), "0.2.0"); CHECK(false); }
+    catch (const std::runtime_error&) {}
+}
 int main() try {
+    client_update_metadata();
+#ifdef LOKI_HAS_SKALD
+    skald_working_copy();
+#endif
     hashing();
     indexes();
     naming();

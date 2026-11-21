@@ -1,17 +1,19 @@
 #pragma once
-#include "desktop.hpp"
-#include <ostream>
+#include "store.hpp"
 
 namespace loki {
-int git_command(Desktop& client, std::vector<std::string> words,
-                    const std::filesystem::path& directory, std::ostream& output,
-                    const std::string& server = {}, const std::string& token = {}, std::ostream* git_log = nullptr);
-struct GitRepository { std::string id, name, role; };
-std::vector<GitRepository> git_repositories(Store& store);
-std::filesystem::path git_folder(Store& store, const std::string& id);
-void link_git_folder(Store& store, const std::string& id, const std::filesystem::path& folder);
-std::string git_status(const std::filesystem::path& folder);
-void commit_git_changes(const std::filesystem::path& folder, const std::string& summary);
+struct HostedRepository { std::string id, name, role; };
+enum class RepositoryTransfer { Fetch, Pull, Push };
+std::vector<HostedRepository> hosted_repositories(Store& store);
+std::string create_hosted_repository(Store& store, const std::string& name,
+                                     const std::optional<std::filesystem::path>& folder);
+void clone_hosted_repository(Store& store, const std::string& id, const std::filesystem::path& folder);
+void transfer_repository(Store& store, const std::string& id, const std::filesystem::path& folder,
+                         RepositoryTransfer transfer);
+std::filesystem::path repository_folder(Store& store, const std::string& id);
+void link_repository_folder(Store& store, const std::string& id, const std::filesystem::path& folder);
+std::string repository_status(const std::filesystem::path& folder);
+void commit_repository_changes(const std::filesystem::path& folder, const std::string& summary, const std::string& author);
 bool starts_at_sign_in();
 void set_start_at_sign_in(bool enabled);
 }

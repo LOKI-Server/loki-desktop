@@ -19,7 +19,6 @@ public:
                const std::string& password, const std::string& code);
     void remember(const std::string& server, const Session& session);
     void logout(bool local = false);
-    nlohmann::json status();
     static void watch(Api api, const std::function<bool()>& active,
                       const std::function<void()>& changed, int wait = 60);
     void map(const std::string& folder, const std::filesystem::path& destination);
@@ -29,7 +28,6 @@ public:
                          const std::string& path, const std::filesystem::path& destination,
                          const std::function<bool(std::int64_t, std::int64_t)>& progress,
                          const std::function<bool()>& active, const FileMetadata* expected = nullptr);
-    Store& store() { return store_; }
 private:
     Store& store_;
 };

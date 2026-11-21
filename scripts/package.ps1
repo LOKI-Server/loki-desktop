@@ -1,5 +1,5 @@
 # Builds LOKI Client in release mode and packs a portable Windows ZIP:
-# the GUI and CLI executables, their runtime DLLs, the Microsoft C++
+# the GUI executable, its runtime DLLs, the Microsoft C++
 # runtime (app-local, so no redistributable install is needed), README and LICENSE.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\package.ps1
@@ -17,7 +17,14 @@ xmake build -y
 if ($LASTEXITCODE -ne 0) { throw "xmake build failed" }
 $build = Join-Path $root "build\windows\$Arch\release"
 $exe = Join-Path $build "loki-client.exe"
-$cli = Join-Path $build "loki-git.exe"
+if ((Get-Item -LiteralPath $exe).VersionInfo.ProductVersion -ne $version) {
+    throw "The executable and release ZIP versions must match for automatic updates."
+}
+$skald = Join-Path $build "skald_vcs.dll"
+$skaldLicense = Join-Path $build "SKALD-LICENSE"
+if (!(Test-Path -LiteralPath $skald) -or !(Test-Path -LiteralPath $skaldLicense)) {
+    throw "The Skald SDK is required for the portable Desktop release. The published SDK targets Windows x64."
+}
 
 # The DLL names a PE file imports, read straight from its import directory.
 function Get-Imports([string]$Path) {
@@ -52,7 +59,6 @@ function Get-Imports([string]$Path) {
 $needed = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $queue = [Collections.Generic.Queue[string]]::new()
 $queue.Enqueue($exe)
-$queue.Enqueue($cli)
 $runtime = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 while ($queue.Count -gt 0) {
     foreach ($dll in Get-Imports $queue.Dequeue()) {
@@ -86,14 +92,14 @@ if (Test-Path -LiteralPath $stage) {
     Remove-Item -LiteralPath $resolvedStage -Recurse -Force
 }
 New-Item -ItemType Directory -Force $stage | Out-Null
-Copy-Item $exe, $cli $stage
+Copy-Item $exe $stage
 foreach ($dll in $needed) { Copy-Item (Join-Path $build $dll) $stage }
 foreach ($dll in $runtime) {
     $source = Join-Path $crt $dll
     if (-not (Test-Path $source)) { throw "$dll is not in $crt" }
     Copy-Item $source $stage
 }
-Copy-Item README.md, LICENSE $stage
+Copy-Item README.md, LICENSE, $skaldLicense $stage
 
 $zip = Join-Path $dist "$name.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }

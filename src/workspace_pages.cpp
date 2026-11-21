@@ -12,8 +12,6 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
-#include <nlohmann/json.hpp>
-#include <sstream>
 #include <thread>
 
 namespace fs = std::filesystem;
@@ -33,6 +31,7 @@ public:
         layout_->Add(heading, 0, wxBOTTOM, FromDIP(12));
     }
     ~AsyncPage() override { *alive_ = false; }
+    bool Busy() const { return busy_; }
 
     void Activate() {
         const auto token = store_.token();
@@ -231,9 +230,9 @@ private:
     std::shared_ptr<std::atomic<bool>> cancelled_ = std::make_shared<std::atomic<bool>>(false);
 };
 
-class GitPage : public AsyncPage {
+class RepositoryPage : public AsyncPage {
 public:
-    GitPage(wxWindow* parent, Store& store) : AsyncPage(parent, store, "Git") {
+    RepositoryPage(wxWindow* parent, Store& store) : AsyncPage(parent, store, "Repositories") {
         auto* top = new wxBoxSizer(wxHORIZONTAL);
         refresh_ = Button(top, "Refresh", [this] { RefreshData(); });
         create_ = Button(top, wxS("New repository…"), [this] { Create(false); });
@@ -258,9 +257,9 @@ public:
         });
         details->Add(local, 0, wxEXPAND | wxBOTTOM, FromDIP(6));
         auto* transfers = new wxBoxSizer(wxHORIZONTAL);
-        fetch_ = Button(transfers, "Fetch", [this] { Transfer("fetch"); });
-        pull_ = Button(transfers, "Pull", [this] { Transfer("pull"); });
-        push_ = Button(transfers, "Push", [this] { Transfer("push"); });
+        fetch_ = Button(transfers, "Fetch", [this] { Transfer(RepositoryTransfer::Fetch); });
+        pull_ = Button(transfers, "Pull", [this] { Transfer(RepositoryTransfer::Pull); });
+        push_ = Button(transfers, "Push", [this] { Transfer(RepositoryTransfer::Push); });
         commit_ = Button(transfers, wxS("Commit all changes…"), [this] { Commit(); });
         details->Add(transfers, 0, wxEXPAND | wxBOTTOM, FromDIP(8));
         changes_ = new wxTextCtrl(this, wxID_ANY, "", wxDefaultPosition, wxDefaultSize,
@@ -276,7 +275,7 @@ public:
     }
 
 private:
-    const GitRepository* Selected() const {
+    const HostedRepository* Selected() const {
         const auto row = list_->GetSelection();
         return row >= 0 && size_t(row) < repositories_.size() ? &repositories_[size_t(row)] : nullptr;
     }
@@ -296,10 +295,10 @@ private:
 
     void RefreshRepositories(std::string preferred) {
         const auto directory = store_.directory();
-        const auto result = std::make_shared<std::vector<GitRepository>>();
+        const auto result = std::make_shared<std::vector<HostedRepository>>();
         Work(wxS("Loading repositories…"), [directory, result] {
             Store store(directory);
-            *result = git_repositories(store);
+            *result = hosted_repositories(store);
         }, [this, result, preferred = std::move(preferred)] {
             repositories_ = std::move(*result);
             list_->Clear();
@@ -335,31 +334,13 @@ private:
         changes_->Clear();
         const auto* repo = Selected();
         heading_->SetLabel(repo ? W(repo->name + " · " + repo->role) : wxString("Select a repository"));
-        if (repo) folder_ = git_folder(store_, repo->id);
-        folder_label_->SetValue(folder_.empty() ? wxString("Clone or link a local Git folder") : W(path_utf8(folder_)));
+        if (repo) folder_ = repository_folder(store_, repo->id);
+        folder_label_->SetValue(folder_.empty() ? wxString("Clone or link a local Skald folder") : W(path_utf8(folder_)));
         Controls();
         if (folder_.empty() || !fs::is_directory(folder_)) return;
         const auto output = std::make_shared<std::string>();
-        Work(wxS("Reading working tree…"), [folder = folder_, output] { *output = git_status(folder); }, [this, output] {
+        Work(wxS("Reading working tree…"), [folder = folder_, output] { *output = repository_status(folder); }, [this, output] {
             changes_->SetValue(W(*output));
-        });
-    }
-
-    void Run(std::vector<std::string> args, fs::path cwd, std::function<void(Store&, const std::string&)> after,
-             std::function<void()> done) {
-        const auto directory = store_.directory();
-        const auto result = std::make_shared<std::string>();
-        Work(wxS("Running Git…"), [directory, result, args = std::move(args), cwd = std::move(cwd), after = std::move(after)] {
-            Store store(directory);
-            Desktop client(store);
-            std::ostringstream log;
-            const auto code = git_command(client, args, cwd, log, {}, {}, &log);
-            *result = log.str();
-            if (code) throw std::runtime_error(result->empty() ? "Git could not complete this operation." : *result);
-            if (after) after(store, *result);
-        }, [this, result, done = std::move(done)] {
-            if (done) done();
-            else if (!result->empty()) changes_->SetValue(W(*result));
         });
     }
 
@@ -367,22 +348,17 @@ private:
         wxTextEntryDialog name(this, "Repository name", "Create private repository");
         if (name.ShowModal() != wxID_OK || name.GetValue().Trim().empty()) return;
         const auto text = U(name.GetValue().Trim());
-        fs::path directory = fs::current_path();
-        std::vector<std::string> args{"create", text};
+        std::optional<fs::path> folder;
         if (publish) {
-            wxDirDialog choose(this, "Choose a local Git worktree to publish");
+            wxDirDialog choose(this, "Choose a local Skald working copy to publish");
             if (choose.ShowModal() != wxID_OK) return;
-            directory = path_from_utf8(U(choose.GetPath()));
-            args.emplace_back("--push");
+            folder = path_from_utf8(U(choose.GetPath()));
         }
         const auto id = std::make_shared<std::string>();
-        Run(std::move(args), directory, [publish, directory, id](Store& store, const std::string& log) {
-            // The create result is the first JSON value. A push may append Git's progress.
-            std::istringstream input(log);
-            nlohmann::json result;
-            input >> result;
-            *id = result.at("id");
-            if (publish) link_git_folder(store, *id, directory);
+        Work(publish ? wxS("Publishing repository…") : wxS("Creating repository…"),
+             [directory = store_.directory(), text, folder, id] {
+            Store store(directory);
+            *id = create_hosted_repository(store, text, folder);
         }, [this, id] { RefreshRepositories(*id); });
     }
 
@@ -395,34 +371,42 @@ private:
         if (repo->name.empty() || repo->name.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-") != std::string::npos)
             throw std::runtime_error("The repository name cannot be used as a local folder.");
         const auto folder = parent / path_from_utf8(repo->name);
-        Run({"clone", repo->id, path_utf8(folder)}, parent, [id = repo->id, folder](Store& store, const std::string&) {
-            link_git_folder(store, id, folder);
+        Work(wxS("Cloning repository…"), [directory = store_.directory(), id = repo->id, folder] {
+            Store store(directory);
+            clone_hosted_repository(store, id, folder);
         }, [this] { ShowRepository(); });
     }
 
     void Link() {
         const auto* repo = Selected();
         if (!repo) return;
-        wxDirDialog choose(this, "Choose an existing local Git worktree");
+        wxDirDialog choose(this, "Choose an existing local Skald working copy");
         if (choose.ShowModal() != wxID_OK) return;
         const auto path = path_from_utf8(U(choose.GetPath()));
         const auto directory = store_.directory();
         Work(wxS("Checking working folder…"), [directory, id = repo->id, path] {
             Store store(directory);
-            link_git_folder(store, id, path);
+            link_repository_folder(store, id, path);
         }, [this] { ShowRepository(); });
     }
 
-    void Transfer(const std::string& action) {
-        if (const auto* repo = Selected(); repo && !folder_.empty())
-            Run({action, repo->id}, folder_, {}, [this] { ShowRepository(); });
+    void Transfer(RepositoryTransfer transfer) {
+        const auto* repo = Selected();
+        if (!repo || folder_.empty()) return;
+        Work(wxS("Transferring repository data…"),
+             [directory = store_.directory(), id = repo->id, folder = folder_, transfer] {
+            Store store(directory);
+            transfer_repository(store, id, folder, transfer);
+        }, [this] { ShowRepository(); });
     }
 
     void Commit() {
         wxTextEntryDialog message(this, "Commit summary for all changes in this worktree", "Commit all changes");
         if (message.ShowModal() != wxID_OK || message.GetValue().Trim().empty()) return;
-        Work(wxS("Committing changes…"), [folder = folder_, summary = U(message.GetValue().Trim())] {
-            commit_git_changes(folder, summary);
+        const auto session = store_.session();
+        const auto author = session.display_name.empty() ? session.username : session.display_name;
+        Work(wxS("Committing changes…"), [folder = folder_, summary = U(message.GetValue().Trim()), author] {
+            commit_repository_changes(folder, summary, author);
         }, [this] { ShowRepository(); });
     }
 
@@ -430,13 +414,14 @@ private:
     wxStaticText* heading_;
     wxTextCtrl *folder_label_, *changes_;
     wxButton *refresh_, *create_, *publish_, *clone_, *link_, *open_, *fetch_, *pull_, *push_, *commit_;
-    std::vector<GitRepository> repositories_;
+    std::vector<HostedRepository> repositories_;
     fs::path folder_;
 };
 
 }
 wxPanel* build_apps_page(wxWindow* parent, Store& store) { return new AppsPage(parent, store); }
 void activate_apps_page(wxPanel* page) { static_cast<AppsPage*>(page)->Activate(); }
-wxPanel* build_git_page(wxWindow* parent, Store& store) { return new GitPage(parent, store); }
-void activate_git_page(wxPanel* page) { static_cast<GitPage*>(page)->Activate(); }
+wxPanel* build_repository_page(wxWindow* parent, Store& store) { return new RepositoryPage(parent, store); }
+void activate_repository_page(wxPanel* page) { static_cast<RepositoryPage*>(page)->Activate(); }
+bool workspace_page_busy(const wxPanel* page) { return static_cast<const AsyncPage*>(page)->Busy(); }
 }

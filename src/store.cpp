@@ -98,28 +98,14 @@ std::string path_utf8(const fs::path& path) {
 }
 fs::path path_from_utf8(const std::string& text) { return fs::path(std::u8string(text.begin(), text.end())); }
 
-fs::path user_directory(Profile profile) {
-    const bool git = profile == Profile::Git;
+fs::path user_directory() {
 #ifdef _WIN32
-    if (const auto* dir = _wgetenv(git ? L"LOKI_GIT_CONFIG_DIR" : L"LOKI_DESKTOP_CONFIG_DIR"); dir && *dir)
-        return fs::path(dir);
-    if (git)
-        if (const auto* dir = _wgetenv(L"LOKI_CONFIG_DIR"); dir && *dir) return fs::path(dir);
-    if (const auto* dir = _wgetenv(L"APPDATA"); dir && *dir) {
-        const auto root = fs::path(dir);
-        return git ? root / "LOKI" / "CLI" : root / "LOKI Sync";
-    }
+    if (const auto* dir = _wgetenv(L"LOKI_DESKTOP_CONFIG_DIR"); dir && *dir) return fs::path(dir);
+    if (const auto* dir = _wgetenv(L"APPDATA"); dir && *dir) return fs::path(dir) / "LOKI Sync";
 #else
-    if (const auto* dir = std::getenv(git ? "LOKI_GIT_CONFIG_DIR" : "LOKI_DESKTOP_CONFIG_DIR"); dir && *dir)
-        return fs::path(dir);
-    if (git)
-        if (const auto* dir = std::getenv("LOKI_CONFIG_DIR"); dir && *dir) return fs::path(dir);
+    if (const auto* dir = std::getenv("LOKI_DESKTOP_CONFIG_DIR"); dir && *dir) return fs::path(dir);
     if (const auto* home = std::getenv("HOME"); home && *home) {
         const auto root = fs::path(home);
-        if (git) {
-            const auto* config = std::getenv("XDG_CONFIG_HOME");
-            return (config && *config ? fs::path(config) : root / ".config") / "loki" / "cli";
-        }
 #ifdef __APPLE__
         return root / "Library" / "Application Support" / "LOKI Sync";
 #else
@@ -130,8 +116,7 @@ fs::path user_directory(Profile profile) {
 #endif
     }
 #endif
-    throw std::runtime_error(git ? "Set LOKI_GIT_CONFIG_DIR to the Git profile directory."
-                                 : "Set LOKI_DESKTOP_CONFIG_DIR to the desktop profile directory.");
+    throw std::runtime_error("Set LOKI_DESKTOP_CONFIG_DIR to the desktop profile directory.");
 }
 
 namespace {
@@ -168,37 +153,33 @@ std::string protect(std::string value, bool encrypt) {
 }
 #endif
 
-std::string load_token(const json& values, bool old_cli = false) {
+std::string load_token(const json& values) {
     auto token = values.value("token", "");
 #ifdef _WIN32
-    if (!token.empty() && (old_cli || values.value("protected", false))) token = protect(std::move(token), false);
-#else
-    (void)old_cli;
+    if (!token.empty() && values.value("protected", false)) token = protect(std::move(token), false);
 #endif
     return token;
 }
 }  // namespace
 
-Store::Store(fs::path directory, Profile profile) : directory_(std::move(directory)), profile_(profile) {
+Store::Store(fs::path directory) : directory_(std::move(directory)) {
     fs::create_directories(directory_);
     ProfileLock transaction(directory_ / "profile.lock");
     load();
-    if (profile_ == Profile::Desktop) fs::create_directories(directory_ / "index");
+    fs::create_directories(directory_ / "index");
     if (!token_.empty()) return;
 
-    const bool git = profile_ == Profile::Git;
-    const auto legacy_file = directory_ / (git ? "session.json" : "files.json");
+    const auto legacy_file = directory_ / "files.json";
     const auto credentials = json::parse(read_text(legacy_file), nullptr, false);
     if (credentials.is_object() && !credentials.value("token", "").empty()) {
         server_ = credentials.value("server", "");
-        token_ = load_token(credentials, git);
+        token_ = load_token(credentials);
         username_ = credentials.value("username", "");
         display_name_ = credentials.value("display_name", "");
         can_sync_ = credentials.value("can_sync", true);
         save();
         write_atomically(legacy_file, "{}");
     } else if (!fs::exists(directory_ / "config.json")) {
-        // Claim the directory even before sign-in, so the other frontend cannot reuse it.
         save();
     }
 }
@@ -208,10 +189,8 @@ void Store::load() const {
     if (!o.is_object()) {
         if (fs::exists(directory_ / "config.json")) throw std::runtime_error("Cannot read the LOKI profile.");
         o = json::object();
-    } else {
-        const auto expected = profile_ == Profile::Git ? "git" : "desktop";
-        if (o.value("profile", "desktop") != expected)
-            throw std::runtime_error("The GUI and loki-git need separate profile directories.");
+    } else if (o.value("profile", "desktop") != "desktop") {
+        throw std::runtime_error("Choose a LOKI Desktop profile directory.");
     }
 
     server_ = o.value("server", "");
@@ -238,7 +217,7 @@ void Store::save() const {
                         {"last_result", m.last_result},
                         {"failed", m.failed}};
     }
-    json o{{"profile", profile_ == Profile::Git ? "git" : "desktop"},
+    json o{{"profile", "desktop"},
            {"server", server_},
            {"token", token_},
            {"username", username_},
@@ -337,15 +316,11 @@ void Store::sign_out(const std::optional<std::string>& expected) {
     display_name_.clear();
     device_id_.clear();
     scope_.clear();
-    if (profile_ == Profile::Desktop) {
-        write_atomically(directory_ / "files.json", "{}");
-        mappings_.clear();
-        std::error_code ignored;
-        fs::remove_all(directory_ / "index", ignored);
-        fs::create_directories(directory_ / "index", ignored);
-    } else {
-        write_atomically(directory_ / "session.json", "{}");
-    }
+    write_atomically(directory_ / "files.json", "{}");
+    mappings_.clear();
+    std::error_code ignored;
+    fs::remove_all(directory_ / "index", ignored);
+    fs::create_directories(directory_ / "index", ignored);
     save();
 }
 

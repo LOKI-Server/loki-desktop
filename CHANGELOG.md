@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.2.0
+
+- Added the Skald-backed **Repositories** page for use with LOKI Server 0.8.0.
+- Added automatic Windows client update checks and **More → Check for client updates**.
+
+## 0.1.0
 
 First release of LOKI Client for desktop (Windows x64).
 

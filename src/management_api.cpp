@@ -103,19 +103,6 @@ std::optional<Session> ManagementApi::poll(const std::string& scope, const std::
 
 void ManagementApi::sign_out() { api_.sign_out(); }
 
-json ManagementApi::repository(const std::string& selector) {
-    const auto list = request("GET", "/api/v1/repos");
-    std::string id;
-    for (const auto& repo : list.at("repositories")) {
-        if (repo.at("id") == selector) return request("GET", repo_path(selector));
-        if (repo.at("name") != selector) continue;
-        if (!id.empty()) throw std::runtime_error("More than one repository has this name. Use its ID from loki-git repo list.");
-        id = repo.at("id");
-    }
-    if (id.empty()) throw std::runtime_error("No accessible repository matches " + selector + ".");
-    return request("GET", repo_path(id));
-}
-
 json ManagementApi::create_repository(const std::string& name, const std::string& branch) {
     return request("POST", "/api/v1/repos", {{"name", name}, {"default_branch", branch}});
 }

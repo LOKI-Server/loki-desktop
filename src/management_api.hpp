@@ -16,7 +16,6 @@ public:
     void sign_out();
     nlohmann::json request(const std::string& method, const std::string& path);
     nlohmann::json request(const std::string& method, const std::string& path, const nlohmann::json& body);
-    nlohmann::json repository(const std::string& selector);
     nlohmann::json create_repository(const std::string& name, const std::string& branch);
     static std::string origin(const std::string& server);
     static std::string repo_path(const std::string& id);

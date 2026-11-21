@@ -125,11 +125,16 @@ MainFrame::MainFrame(Store& store)
     const auto browse = wxWindow::NewControlId();
     app_menu->Append(browse, wxS("Browse files…"));
     const auto commands = wxWindow::NewControlId();
-    app_menu->Append(commands, wxS("Git repositories"));
+    app_menu->Append(commands, wxS("Repositories"));
     const auto connect = wxWindow::NewControlId();
     app_menu->Append(connect, wxS("Reconnect to LOKI…"));
     app_menu->Append(wxID_REFRESH, "Sync now");
 #ifdef __WXMSW__
+#ifdef LOKI_HAS_SKALD
+    update_menu_id_ = wxWindow::NewControlId();
+    app_menu->Append(update_menu_id_, wxS("Check for client updates…"));
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { CheckClientUpdates(true); }, update_menu_id_);
+#endif
     const auto autostart = wxWindow::NewControlId();
     app_menu->AppendCheckItem(autostart, "Start at sign-in");
     // Keep the entry pointing at this copy, in case the app was moved since it was set.
@@ -201,6 +206,13 @@ MainFrame::MainFrame(Store& store)
         server_->SetValue(W(store_.server()));
     }
     Centre();
+#if defined(_WIN32) && defined(LOKI_HAS_SKALD)
+    Bind(wxEVT_TIMER, [this](wxTimerEvent&) {
+        if (prepared_update_) TryInstallClientUpdate();
+        else CheckClientUpdates(false);
+    }, updates_.GetId());
+    updates_.StartOnce(3000);
+#endif
 }
 
 MainFrame::~MainFrame() {
@@ -209,6 +221,9 @@ MainFrame::~MainFrame() {
     StopWatching();
     timer_.Stop();
     settle_.Stop();
+#if defined(_WIN32) && defined(LOKI_HAS_SKALD)
+    updates_.Stop();
+#endif
     if (tray_) tray_->RemoveIcon();
 }
 
@@ -232,7 +247,82 @@ void MainFrame::ShowWindow() {
     Show();
     Iconize(false);
     Raise();
+#if defined(_WIN32) && defined(LOKI_HAS_SKALD)
+    OfferClientUpdate(false);
+#endif
 }
+
+#if defined(_WIN32) && defined(LOKI_HAS_SKALD)
+void MainFrame::CheckClientUpdates(bool manual) {
+    if (checking_updates_ || prepared_update_) return;
+    updates_.StartOnce(6 * 60 * 60 * 1000);
+    checking_updates_ = true;
+    GetMenuBar()->Enable(update_menu_id_, false);
+    auto result = std::make_shared<std::optional<ClientUpdate>>();
+    Background([result] { *result = check_client_update(LOKI_CLIENT_VERSION); },
+        [this, result, manual](std::optional<std::string> error) {
+            checking_updates_ = false;
+            GetMenuBar()->Enable(update_menu_id_, true);
+            if (error) {
+                if (manual) wxMessageBox(W(*error), "Client updates", wxOK | wxICON_WARNING, this);
+                return;
+            }
+            available_update_ = std::move(*result);
+            if (!available_update_ && manual) {
+                wxMessageBox("Loki Client is up to date.", "Client updates", wxOK | wxICON_INFORMATION, this);
+                return;
+            }
+            OfferClientUpdate(manual);
+        });
+}
+
+void MainFrame::OfferClientUpdate(bool manual) {
+    if (!available_update_ || checking_updates_ || prepared_update_ || !IsShown() || !IsEnabled() ||
+        (!manual && available_update_->version == offered_version_)) return;
+    const auto release = *available_update_;
+    offered_version_ = release.version;
+    checking_updates_ = true;
+    const auto consent = wxMessageBox(
+        W("Loki Client " + release.version + " is available. Download it and restart when current transfers finish?"),
+        "Client update", wxYES_NO | wxNO_DEFAULT | wxICON_INFORMATION, this);
+    if (consent != wxYES) { checking_updates_ = false; return; }
+    GetMenuBar()->Enable(update_menu_id_, false);
+    GetMenuBar()->SetLabel(update_menu_id_, wxS("Downloading client update…"));
+    auto result = std::make_shared<std::shared_ptr<PreparedClientUpdate>>();
+    Background([release, result] { *result = prepare_client_update(release); },
+        [this, result](std::optional<std::string> error) {
+            checking_updates_ = false;
+            if (error) {
+                GetMenuBar()->SetLabel(update_menu_id_, wxS("Check for client updates…"));
+                GetMenuBar()->Enable(update_menu_id_, true);
+                wxMessageBox(W(*error), "Client update", wxOK | wxICON_ERROR, this);
+                return;
+            }
+            prepared_update_ = std::move(*result);
+            TryInstallClientUpdate();
+        });
+}
+
+void MainFrame::TryInstallClientUpdate() {
+    if (!IsEnabled() || syncing_ || file_browser_busy(static_cast<wxPanel*>(pages_->GetPage(1))) ||
+        workspace_page_busy(static_cast<wxPanel*>(pages_->GetPage(2))) ||
+        workspace_page_busy(static_cast<wxPanel*>(pages_->GetPage(3)))) {
+        GetMenuBar()->SetLabel(update_menu_id_, wxS("Update ready. Waiting for transfers…"));
+        updates_.StartOnce(2000);
+        return;
+    }
+    try {
+        prepared_update_->install_after_exit();
+        Quit();
+    } catch (const std::exception& error) {
+        prepared_update_.reset();
+        GetMenuBar()->SetLabel(update_menu_id_, wxS("Check for client updates…"));
+        GetMenuBar()->Enable(update_menu_id_, true);
+        updates_.StartOnce(6 * 60 * 60 * 1000);
+        wxMessageBox(W(error.what()), "Client update", wxOK | wxICON_ERROR, this);
+    }
+}
+#endif
 
 void MainFrame::Quit() {
     quitting_ = true;
@@ -254,7 +344,7 @@ wxPanel* MainFrame::BuildWorkspace(wxWindow* parent) {
     brand->SetFont(brand->GetFont().Scaled(1.55f).Bold());
     column->Add(brand, 0, wxALL, FromDIP(14));
     navigation_ = new wxListBox(sidebar, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(146, 132)),
-        {"Sync", "Browse", "Apps", "Git"}, wxLB_SINGLE | wxBORDER_NONE);
+        {"Sync", "Browse", "Apps", "Repositories"}, wxLB_SINGLE | wxBORDER_NONE);
     navigation_->Bind(wxEVT_LISTBOX, [this](wxCommandEvent& event) { OpenPage(event.GetSelection()); });
     column->Add(navigation_, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
     column->AddStretchSpacer();
@@ -270,7 +360,7 @@ wxPanel* MainFrame::BuildWorkspace(wxWindow* parent) {
     pages_->AddPage(BuildFolders(pages_), "Sync");
     pages_->AddPage(build_file_browser(pages_, store_), "Browse");
     pages_->AddPage(build_apps_page(pages_, store_), "Apps");
-    pages_->AddPage(build_git_page(pages_, store_), "Git");
+    pages_->AddPage(build_repository_page(pages_, store_), "Repositories");
     row->Add(pages_, 1, wxEXPAND);
     workspace->SetSizer(row);
     return workspace;
@@ -285,7 +375,7 @@ void MainFrame::OpenPage(int index) {
     switch (index) {
         case 1: activate_file_browser(static_cast<wxPanel*>(pages_->GetPage(1))); break;
         case 2: activate_apps_page(static_cast<wxPanel*>(pages_->GetPage(2))); break;
-        case 3: activate_git_page(static_cast<wxPanel*>(pages_->GetPage(3))); break;
+        case 3: activate_repository_page(static_cast<wxPanel*>(pages_->GetPage(3))); break;
     }
     Layout();
 }
@@ -515,7 +605,7 @@ void MainFrame::ProfileChanged() {
                 list_->DeleteAllItems();
                 activate_file_browser(static_cast<wxPanel*>(pages_->GetPage(1)));
                 activate_apps_page(static_cast<wxPanel*>(pages_->GetPage(2)));
-                activate_git_page(static_cast<wxPanel*>(pages_->GetPage(3)));
+                activate_repository_page(static_cast<wxPanel*>(pages_->GetPage(3)));
                 discovered_.reset();
                 ShowConnectStep();
                 book_->SetSelection(0);
@@ -755,6 +845,9 @@ void MainFrame::OnSignOut() {
 }
 
 void MainFrame::SyncNow() {
+#if defined(_WIN32) && defined(LOKI_HAS_SKALD)
+    if (prepared_update_) return;
+#endif
     if (!store_.signed_in() || !store_.can_sync()) return;
     if (syncing_.exchange(true)) {
         rerun_ = true;
