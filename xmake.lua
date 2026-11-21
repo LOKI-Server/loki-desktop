@@ -5,7 +5,7 @@
 --   xmake test            # engine and hashing tests
 
 set_project("loki-sync")
-set_version("0.2.0")
+set_version("0.2.1")
 set_xmakever("2.9.0")
 set_languages("c++20")
 add_rules("mode.debug", "mode.release")

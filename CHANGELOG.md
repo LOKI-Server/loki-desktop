@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Show an animated progress bar while repository operations run.
+- Explain server storage errors when a repository push fails and show where to check quotas.
+
 ## 0.2.0
 
 - Added the Skald-backed **Repositories** page for use with LOKI Server 0.8.0.
