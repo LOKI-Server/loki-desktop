@@ -1,6 +1,7 @@
 #include "workspace_pages.hpp"
 
 #include <wx/wx.h>
+#include <wx/choicdlg.h>
 #include <wx/dirdlg.h>
 #include <wx/filename.h>
 #include <wx/listctrl.h>
@@ -303,20 +304,25 @@ private:
 
     void RefreshRepositories(std::string preferred) {
         const auto directory = store_.directory();
-        const auto result = std::make_shared<std::vector<HostedRepository>>();
+        const auto result = std::make_shared<HostedRepositories>();
         Work(wxS("Loading repositories…"), [directory, result] {
             Store store(directory);
             *result = hosted_repositories(store);
         }, [this, result, preferred = std::move(preferred)] {
-            repositories_ = std::move(*result);
+            repositories_ = std::move(result->repositories);
+            owners_ = std::move(result->owners);
             list_->Clear();
             int index = repositories_.empty() ? wxNOT_FOUND : 0;
             for (size_t i = 0; i < repositories_.size(); ++i) {
-                list_->Append(W(repositories_[i].name));
+                list_->Append(W(repositories_[i].label()));
                 if (repositories_[i].id == preferred) index = int(i);
             }
             list_->SetSelection(index);
-            if (index == wxNOT_FOUND) status_->SetLabel("You have no repositories yet.");
+            if (result->transfers_waiting)
+                status_->SetLabel(W(std::to_string(result->transfers_waiting) +
+                    (result->transfers_waiting == 1 ? " repository transfer is" : " repository transfers are") +
+                    " waiting for you. Accept or decline it on the Repositories page of LOKI in your browser."));
+            else if (index == wxNOT_FOUND) status_->SetLabel("You have no repositories yet.");
             ShowRepository();
         });
     }
@@ -326,8 +332,8 @@ private:
         const bool working_tree = !busy_ && repo && !folder_.empty() && fs::is_directory(folder_);
         list_->Enable(!busy_);
         refresh_->Enable(!busy_);
-        create_->Enable(!busy_);
-        publish_->Enable(!busy_);
+        create_->Enable(!busy_ && !owners_.empty());
+        publish_->Enable(!busy_ && !owners_.empty());
         clone_->Enable(!busy_ && repo);
         link_->Enable(!busy_ && repo);
         open_->Enable(working_tree);
@@ -351,7 +357,7 @@ private:
         folder_.clear();
         changes_->Clear();
         const auto* repo = Selected();
-        heading_->SetLabel(repo ? W(repo->name + " · " + repo->role) : wxString("Select a repository"));
+        heading_->SetLabel(repo ? W(repo->label() + " · " + repo->role) : wxString("Select a repository"));
         if (repo) folder_ = repository_folder(store_, repo->id);
         folder_label_->SetValue(folder_.empty() ? wxString("Clone or link a local Skald folder") : W(path_utf8(folder_)));
         Controls();
@@ -363,6 +369,16 @@ private:
     }
 
     void Create(bool publish) {
+        if (owners_.empty()) return;
+        // Ask who owns it only when a group is possible; otherwise it is yours.
+        std::string group = owners_.front().group;
+        if (owners_.size() > 1) {
+            wxArrayString labels;
+            for (const auto& owner : owners_) labels.Add(W(owner.label));
+            wxSingleChoiceDialog owner(this, "Who should own the new repository?", "Create private repository", labels);
+            if (owner.ShowModal() != wxID_OK) return;
+            group = owners_[size_t(owner.GetSelection())].group;
+        }
         wxTextEntryDialog name(this, "Repository name", "Create private repository");
         if (name.ShowModal() != wxID_OK || name.GetValue().Trim().empty()) return;
         const auto text = U(name.GetValue().Trim());
@@ -374,9 +390,9 @@ private:
         }
         const auto id = std::make_shared<std::string>();
         Work(publish ? wxS("Publishing repository…") : wxS("Creating repository…"),
-             [directory = store_.directory(), text, folder, id] {
+             [directory = store_.directory(), text, folder, group, id] {
             Store store(directory);
-            *id = create_hosted_repository(store, text, folder);
+            *id = create_hosted_repository(store, text, folder, group);
         }, [this, id] { RefreshRepositories(*id); });
     }
 
@@ -437,6 +453,7 @@ private:
     wxGauge* progress_;
     wxTimer progress_timer_{this};
     std::vector<HostedRepository> repositories_;
+    std::vector<RepositoryOwner> owners_;
     fs::path folder_;
 };
 

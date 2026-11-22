@@ -103,8 +103,11 @@ std::optional<Session> ManagementApi::poll(const std::string& scope, const std::
 
 void ManagementApi::sign_out() { api_.sign_out(); }
 
-json ManagementApi::create_repository(const std::string& name, const std::string& branch) {
-    return request("POST", "/api/v1/repos", {{"name", name}, {"default_branch", branch}});
+json ManagementApi::create_repository(const std::string& name, const std::string& branch, const std::string& group) {
+    json body{{"name", name}, {"default_branch", branch}};
+    // Older servers reject unknown fields, so `group` is only sent when one was chosen.
+    if (!group.empty()) body["group"] = group;
+    return request("POST", "/api/v1/repos", body);
 }
 
 }

@@ -16,7 +16,8 @@ public:
     void sign_out();
     nlohmann::json request(const std::string& method, const std::string& path);
     nlohmann::json request(const std::string& method, const std::string& path, const nlohmann::json& body);
-    nlohmann::json create_repository(const std::string& name, const std::string& branch);
+    // `group`, when set, makes a group own the repository (LOKI 0.9 and later).
+    nlohmann::json create_repository(const std::string& name, const std::string& branch, const std::string& group = {});
     static std::string origin(const std::string& server);
     static std::string repo_path(const std::string& id);
 

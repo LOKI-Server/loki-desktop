@@ -165,29 +165,44 @@ std::string repository_author(ManagementApi& api) {
 #endif
 } // namespace
 
-std::vector<HostedRepository> hosted_repositories(Store& store) {
+HostedRepositories hosted_repositories(Store& store) {
     const auto account = store.account();
     ManagementApi api(account.server, account.session.token);
-    const auto listing = api.request("GET", "/api/v1/repos");
-    std::vector<HostedRepository> repos;
-    for (const auto& repo : listing.at("repositories")) {
-        if (repo.contains("remote_url"))
-            repos.push_back({repo.at("id"), repo.at("name"), repo.at("role")});
-    }
-    return repos;
+    return read_hosted_repositories(api.request("GET", "/api/v1/repos"), store.session().username);
 }
 
-std::string create_hosted_repository(Store& store, const std::string& name, const std::optional<fs::path>& folder) {
+HostedRepositories read_hosted_repositories(const json& listing, const std::string& username) {
+    HostedRepositories result;
+    for (const auto& repo : listing.at("repositories")) {
+        if (!repo.contains("remote_url")) continue;
+        std::string owner;
+        if (const auto found = repo.find("owner"); found != repo.end() && found->is_object())
+            owner = found->value("name", "");
+        result.repositories.push_back({repo.at("id"), repo.at("name"), repo.at("role"), owner});
+    }
+    // Servers before LOKI 0.9 send only `create`, and only personal repositories exist there.
+    if (listing.value("create", true)) result.owners.push_back({"", "You (@" + username + ")"});
+    if (const auto groups = listing.find("groups"); groups != listing.end() && groups->is_array())
+        for (const auto& group : *groups)
+            result.owners.push_back({group.at("id"), "Group: " + group.value("name", "")});
+    if (const auto transfers = listing.find("transfers"); transfers != listing.end() && transfers->is_array())
+        for (const auto& transfer : *transfers)
+            if (transfer.value("can_decide", false)) ++result.transfers_waiting;
+    return result;
+}
+
+std::string create_hosted_repository(Store& store, const std::string& name, const std::optional<fs::path>& folder,
+                                     const std::string& group) {
     const auto account = store.account();
     ManagementApi api(account.server, account.session.token);
-    if (!folder) return api.create_repository(name, "main").at("id");
+    if (!folder) return api.create_repository(name, "main", group).at("id");
 #ifdef LOKI_HAS_SKALD
     const auto workspace = open_workspace(*folder);
     const auto branch = current_branch(workspace);
     require_local_branch(workspace, branch);
     if (remotes(workspace).contains("loki"))
         throw std::runtime_error("This working copy already has a 'loki' remote. Choose a working copy without that remote.");
-    const auto repo = api.create_repository(name, branch);
+    const auto repo = api.create_repository(name, branch, group);
     const auto id = repo.at("id").get<std::string>();
     link_repository_folder(store, id, *folder);
     try {

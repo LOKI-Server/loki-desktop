@@ -379,8 +379,31 @@ static void client_update_metadata() {
     try { select_client_update(release.dump(), "0.2.0"); CHECK(false); }
     catch (const std::runtime_error&) {}
 }
+// Repository listings from LOKI 0.9 name owners and offer groups; older ones don't.
+static void repository_listings() {
+    const auto old = read_hosted_repositories(nlohmann::json::parse(R"({"repositories":[
+        {"id":"a","name":"game","role":"manage","remote_url":"x"},{"id":"b","name":"hidden","role":"read"}],"create":true})"), "sam");
+    CHECK(old.repositories.size() == 1);
+    CHECK(old.repositories[0].label() == "game");
+    CHECK(old.owners.size() == 1 && old.owners[0].group.empty() && old.owners[0].label == "You (@sam)");
+    CHECK(old.transfers_waiting == 0);
+
+    const auto now = read_hosted_repositories(nlohmann::json::parse(R"({"repositories":[
+        {"id":"a","name":"game","role":"write","remote_url":"x","owner":{"kind":"group","id":"g1","name":"Kiwis"}},
+        {"id":"b","name":"game","role":"manage","remote_url":"y","owner":{"kind":"user","id":"u","name":"sam"}}],
+        "create":false,"groups":[{"id":"g1","name":"Kiwis","icon":true}],
+        "transfers":[{"repo_id":"c","can_decide":true},{"repo_id":"d","can_decide":false}]})"), "sam");
+    CHECK(now.repositories.size() == 2);
+    CHECK(now.repositories[0].label() == "Kiwis / game");
+    CHECK(now.repositories[1].label() == "sam / game");
+    // Without permission to create personal repositories, only the group is offered.
+    CHECK(now.owners.size() == 1 && now.owners[0].group == "g1" && now.owners[0].label == "Group: Kiwis");
+    CHECK(now.transfers_waiting == 1);
+}
+
 int main() try {
     client_update_metadata();
+    repository_listings();
 #ifdef LOKI_HAS_SKALD
     skald_working_copy();
 #endif

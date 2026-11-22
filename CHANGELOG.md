@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Show who owns each repository, as "owner / name", for LOKI Server 0.9 groups.
+- Choose a group to own a new or published repository when the server allows it.
+- Mention repository transfers waiting for you; accept or decline them in the LOKI dashboard.
+
 ## 0.2.1
 
 - Show an animated progress bar while repository operations run.
