@@ -22,6 +22,7 @@ package("skald-vcs")
     set_kind("library")
     set_license("MIT")
     add_urls("https://github.com/LOKI-Server/skald-vcs/releases/download/v$(version)/skald-vcs-$(version)-x86_64-pc-windows-msvc.zip")
+    add_versions("0.2.0", "c30c701f93769d7c761f03228699a34b4f979791954f3dfce91fa849121e8dc6")
     add_versions("0.1.0", "7cd220c5ee8b9f253a540202c41c2357bf18b4b83759d0856bb23a36e1a62de6")
     add_links("skald_vcs")
     on_install("windows", function (package)
@@ -41,7 +42,7 @@ package_end()
 
 local skald_supported = is_plat("windows") and is_arch("x64", "x86_64")
 if skald_supported then
-    add_requires("skald-vcs 0.1.0", {system = false})
+    add_requires("skald-vcs 0.2.0", {system = false})
 end
 
 add_requires("libcurl", "nlohmann_json")

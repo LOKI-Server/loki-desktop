@@ -5,6 +5,7 @@
 - Show who owns each repository, as "owner / name", for LOKI Server 0.9 groups.
 - Choose a group to own a new or published repository when the server allows it.
 - Mention repository transfers waiting for you; accept or decline them in the LOKI dashboard.
+- Update Skald to 0.2.0, so a refused push shows the server's reason, such as a repository waiting for a transfer.
 
 ## 0.2.1
 
