@@ -1,6 +1,7 @@
 #include "files_dialog.hpp"
 #include "files_api.hpp"
 #include "desktop.hpp"
+#include "ui.hpp"
 #include <wx/wx.h>
 #include <wx/filedlg.h>
 #include <wx/filename.h>
@@ -28,63 +29,60 @@ public:
     FilesPage(wxWindow* parent, Store& store)
         : wxPanel(parent), account_(store), cache_(store.directory() / "downloads") {
         auto* contents = new wxBoxSizer(wxVERTICAL);
-        auto* browser = this;
-        auto* title = new wxStaticText(this, wxID_ANY, "Browse files");
-        title->SetFont(title->GetFont().Scaled(1.6f).Bold());
-        contents->Add(title, 0, wxBOTTOM, FromDIP(12));
+        auto header = ui::page_header(this, "Browse files", "Shared folders on your LOKI server");
+        refresh_ = ui::button(this, header.actions, "Refresh", [this] {
+            if (share_.empty()) LoadShares(); else LoadEntries(path_, page_);
+        });
+        contents->Add(header.sizer, 0, wxEXPAND | wxBOTTOM, FromDIP(16));
+
         auto* nav = new wxBoxSizer(wxHORIZONTAL);
-        up_ = new wxButton(browser,wxID_ANY,"Up");
-        up_->Bind(wxEVT_BUTTON,[this](wxCommandEvent&) {
+        up_ = ui::button(this, nav, wxS("↑ Up"), [this] {
             if (share_.empty()) return;
             if (path_.empty()) { LoadShares(); return; }
             const auto slash = path_.find_last_of('/');
-            LoadEntries(slash == std::string::npos ? "" : path_.substr(0,slash),0);
+            LoadEntries(slash == std::string::npos ? "" : path_.substr(0, slash), 0);
         });
-        nav->Add(up_,0,wxRIGHT,FromDIP(8));
-        location_ = new wxTextCtrl(browser,wxID_ANY,"Shares",wxDefaultPosition,wxDefaultSize,wxTE_READONLY);
-        nav->Add(location_,1,wxRIGHT,FromDIP(8));
-        refresh_ = new wxButton(browser,wxID_ANY,"Refresh");
-        refresh_->Bind(wxEVT_BUTTON,[this](wxCommandEvent&) { if (share_.empty()) LoadShares(); else LoadEntries(path_,page_); });
-        nav->Add(refresh_);
-        contents->Add(nav,0,wxEXPAND|wxBOTTOM,FromDIP(8));
-        list_ = new wxListCtrl(browser,wxID_ANY,wxDefaultPosition,wxDefaultSize,wxLC_REPORT|wxLC_SINGLE_SEL);
-        list_->AppendColumn("Name",wxLIST_FORMAT_LEFT,FromDIP(330));
-        list_->AppendColumn("Size",wxLIST_FORMAT_RIGHT,FromDIP(100));
-        list_->AppendColumn("Modified",wxLIST_FORMAT_LEFT,FromDIP(160));
+        nav->AddSpacer(FromDIP(8));
+        location_ = new wxTextCtrl(this, wxID_ANY, "Shares", wxDefaultPosition, wxDefaultSize, wxTE_READONLY);
+        nav->Add(location_, 1, wxALIGN_CENTER_VERTICAL);
+        contents->Add(nav, 0, wxEXPAND | wxBOTTOM, FromDIP(10));
+
+        list_ = new wxListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
+        list_->AppendColumn("Name", wxLIST_FORMAT_LEFT, FromDIP(360));
+        list_->AppendColumn("Size", wxLIST_FORMAT_RIGHT, FromDIP(100));
+        list_->AppendColumn("Modified", wxLIST_FORMAT_LEFT, FromDIP(160));
+        ui::fill_last_column(list_);
         // GTK draws wxListCtrl itself. Disabling or rebuilding it inside the
         // activation handler faults the process; Windows' native control does not.
-        list_->Bind(wxEVT_LIST_ITEM_ACTIVATED,[this](wxListEvent& e) {
-            const long row=e.GetIndex();
-            CallAfter([this,alive=alive_,row] { if (*alive) OpenRow(row); });
+        list_->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent& e) {
+            const long row = e.GetIndex();
+            CallAfter([this, alive = alive_, row] { if (*alive) OpenRow(row); });
         });
-        list_->Bind(wxEVT_LIST_ITEM_SELECTED,[this](wxListEvent&) { if (!rebuilding_) UpdateControls(); });
-        list_->Bind(wxEVT_LIST_ITEM_DESELECTED,[this](wxListEvent&) { if (!rebuilding_) UpdateControls(); });
-        list_->Bind(wxEVT_DPI_CHANGED,[this](wxDPIChangedEvent& e) {
-            for (int i=0;i<list_->GetColumnCount();++i) list_->SetColumnWidth(i,e.ScaleX(list_->GetColumnWidth(i)));
+        list_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent&) { if (!rebuilding_) UpdateControls(); });
+        list_->Bind(wxEVT_LIST_ITEM_DESELECTED, [this](wxListEvent&) { if (!rebuilding_) UpdateControls(); });
+        list_->Bind(wxEVT_DPI_CHANGED, [this](wxDPIChangedEvent& e) {
+            for (int i = 0; i < list_->GetColumnCount(); ++i) list_->SetColumnWidth(i, e.ScaleX(list_->GetColumnWidth(i)));
             e.Skip();
         });
-        contents->Add(list_,1,wxEXPAND|wxBOTTOM,FromDIP(8));
+        contents->Add(list_, 1, wxEXPAND);
+
+        gauge_ = new wxGauge(this, wxID_ANY, 1000, wxDefaultPosition, FromDIP(wxSize(-1, 6)));
+        contents->Add(gauge_, 0, wxEXPAND | wxTOP, FromDIP(10));
+
         auto* actions = new wxBoxSizer(wxHORIZONTAL);
-        prev_ = new wxButton(browser,wxID_ANY,"Previous");
-        next_ = new wxButton(browser,wxID_ANY,"Next");
-        prev_->Bind(wxEVT_BUTTON,[this](wxCommandEvent&) { LoadEntries(path_,page_-1); });
-        next_->Bind(wxEVT_BUTTON,[this](wxCommandEvent&) { LoadEntries(path_,page_+1); });
-        actions->Add(prev_,0,wxRIGHT,FromDIP(6)); actions->Add(next_,0,wxRIGHT,FromDIP(8));
-        page_label_ = new wxStaticText(browser,wxID_ANY,"");
-        actions->Add(page_label_,1,wxALIGN_CENTER_VERTICAL);
-        download_ = new wxButton(browser,wxID_ANY,wxS("Download…"));
-        download_->Bind(wxEVT_BUTTON,[this](wxCommandEvent&) { OpenSelected(); });
-        actions->Add(download_,0,wxRIGHT,FromDIP(8));
-        contents->Add(actions, 0, wxEXPAND);
-        status_ = new wxStaticText(this, wxID_ANY, "");
-        contents->Add(status_, 0, wxEXPAND | wxTOP, FromDIP(8));
-        gauge_ = new wxGauge(this, wxID_ANY, 1000);
-        contents->Add(gauge_, 0, wxEXPAND | wxTOP, FromDIP(8));
-        cancel_ = new wxButton(this, wxID_ANY, "Cancel download");
-        cancel_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { *cancelled_ = true; cancel_->Disable(); });
-        contents->Add(cancel_, 0, wxTOP, FromDIP(8));
+        download_ = ui::button(this, actions, wxS("Download…"), [this] { OpenSelected(); });
+        cancel_ = ui::button(this, actions, "Cancel download", [this] { *cancelled_ = true; cancel_->Disable(); });
+        actions->AddStretchSpacer();
+        page_label_ = new wxStaticText(this, wxID_ANY, "");
+        page_label_->SetForegroundColour(ui::muted());
+        actions->Add(page_label_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
+        prev_ = ui::button(this, actions, "Previous", [this] { LoadEntries(path_, page_ - 1); });
+        next_ = ui::button(this, actions, "Next", [this] { LoadEntries(path_, page_ + 1); });
+        contents->Add(actions, 0, wxEXPAND | wxTOP, FromDIP(10));
+        status_ = new ui::Status(this);
+        contents->Add(status_, 0, wxEXPAND | wxTOP, FromDIP(10));
         auto* outer = new wxBoxSizer(wxVERTICAL);
-        outer->Add(contents, 1, wxEXPAND | wxALL, FromDIP(16));
+        outer->Add(contents, 1, wxEXPAND | wxALL, FromDIP(24));
         SetSizer(outer);
         gauge_->Hide();
         cancel_->Hide();
@@ -114,7 +112,7 @@ public:
 private:
     void Work(std::function<void()> job, std::function<void()> done) {
         const auto token = session_;
-        busy_ = true; status_->SetLabel(wxS("Loading…")); UpdateControls();
+        busy_ = true; status_->Info(wxS("Loading…")); UpdateControls();
         std::thread([alive=alive_,job=std::move(job),done=std::move(done),this,token] {
             std::string error; bool unauthorized = false;
             try { job(); }
@@ -129,10 +127,10 @@ private:
                     return;
                 }
                 try {
-                    if (unauthorized) { status_->SetLabel("Your account session expired. Sign out and reconnect in the main window."); }
-                    if (error.empty()) { status_->SetLabel(""); done(); }
-                    else { status_->SetLabel(W(error)); status_->Wrap(GetClientSize().x-FromDIP(32)); }
-                } catch (const std::exception& e) { status_->SetLabel(W(e.what())); }
+                    if (error.empty()) { status_->Clear(); done(); }
+                    else if (unauthorized) status_->Error(wxS("Your session has expired. Use Account → Reconnect to LOKI to sign in again."));
+                    else status_->Error(W(error));
+                } catch (const std::exception& e) { status_->Error(W(e.what())); }
                 busy_ = false; gauge_->Hide(); cancel_->Hide();
                 UpdateControls(); Layout();
             });
@@ -148,7 +146,7 @@ private:
             list_->DeleteAllItems();
             for (size_t i=0;i<shares_.size();++i) list_->InsertItem(long(i),W(shares_[i].name));
             page_label_->SetLabel("");
-            if (shares_.empty()) status_->SetLabel("No shares are available for this account.");
+            if (shares_.empty()) status_->Info("Nothing is shared with your account yet.");
         });
     }
     void LoadEntries(const std::string& path, int page) {
@@ -168,15 +166,21 @@ private:
                     if (modified.IsValid()) list_->SetItem(row,2,modified.Format("%Y-%m-%d %H:%M"));
                 }
             }
-            page_label_->SetLabel(wxString::Format(wxS("Page %d · %lld entries"),page_+1,static_cast<long long>(listing_.total)));
-            if (listing_.entries.empty()) status_->SetLabel("This folder is empty.");
-            if (page_==999 && listing_.total>100000) status_->SetLabel("This folder exceeds the server's browsing limit.");
+            const auto pages = std::max<std::int64_t>(1, (listing_.total + 99) / 100);
+            page_label_->SetLabel(pages > 1
+                ? wxString::Format(wxS("%lld items · page %d of %lld"), static_cast<long long>(listing_.total), page_ + 1, static_cast<long long>(pages))
+                : wxString::Format(listing_.total == 1 ? wxS("%lld item") : wxS("%lld items"), static_cast<long long>(listing_.total)));
+            if (listing_.entries.empty()) status_->Info("This folder is empty.");
+            if (page_==999 && listing_.total>100000) status_->Info("This folder has more items than the server lets you browse.");
         });
     }
     long Selected() const { return list_->GetNextItem(-1,wxLIST_NEXT_ALL,wxLIST_STATE_SELECTED); }
     void UpdateControls() {
         list_->Enable(!busy_); refresh_->Enable(!busy_);
         up_->Enable(!busy_&&!share_.empty());
+        // Paging only appears for folders with more than one page.
+        const bool paged = !share_.empty() && listing_.total > 100;
+        if (prev_->IsShown() != paged) { prev_->Show(paged); next_->Show(paged); Layout(); }
         prev_->Enable(!busy_&&!share_.empty()&&page_>0);
         next_->Enable(!busy_&&!share_.empty()&&page_<999&&(std::int64_t(page_)+1)*100<listing_.total);
         const auto row=Selected();
@@ -213,14 +217,14 @@ private:
                         if (!*alive) return;
                         gauge_->Show(); cancel_->Show();
                         if (total>0) gauge_->SetValue(int(1000.0*double(received)/double(total))); else gauge_->Pulse();
-                        status_->SetLabel(total>0 ? "Downloading "+size_text(received)+" of "+size_text(total) : wxString(wxS("Preparing download…")));
+                        status_->Info(total>0 ? "Downloading "+size_text(received)+" of "+size_text(total) : wxString(wxS("Preparing download…")));
                         Layout();
                     });
                 }
                 return true;
             }, [alive,cancel] { return alive->load() && !cancel->load(); });
-        },[this,name] { status_->SetLabel("Downloaded "+name+" and verified its checksum."); });
-        cancel_->Enable(); cancel_->Show(); gauge_->Show(); status_->SetLabel(wxS("Preparing download…")); Layout();
+        },[this,name] { status_->Success("Downloaded "+name+" and verified its checksum."); });
+        cancel_->Enable(); cancel_->Show(); gauge_->Show(); status_->Info(wxS("Preparing download…")); Layout();
     }
     Store& account_; fs::path cache_;
     std::shared_ptr<std::atomic<bool>> alive_=std::make_shared<std::atomic<bool>>(true);
@@ -229,7 +233,7 @@ private:
     std::string session_;
     wxTextCtrl* location_;
     wxButton *up_,*refresh_,*prev_,*next_,*download_,*cancel_;
-    wxStaticText *status_,*page_label_;
+    ui::Status* status_; wxStaticText* page_label_;
     wxListCtrl* list_; wxGauge* gauge_;
     std::vector<Share> shares_; ShareListing listing_;
     std::string share_,share_name_,path_; int page_=0;

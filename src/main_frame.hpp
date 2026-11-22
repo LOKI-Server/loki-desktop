@@ -2,7 +2,6 @@
 #include <wx/wx.h>
 #include <wx/fswatcher.h>
 #include <wx/listctrl.h>
-#include <wx/listbox.h>
 #include <wx/simplebook.h>
 #include <wx/taskbar.h>
 
@@ -15,6 +14,7 @@
 #include "client_update.hpp"
 #include "desktop.hpp"
 #include "store.hpp"
+#include "ui.hpp"
 
 namespace loki {
 
@@ -57,8 +57,11 @@ private:
     wxPanel* BuildConnect(wxWindow* parent);
     wxPanel* BuildFolders(wxWindow* parent);
     wxPanel* BuildWorkspace(wxWindow* parent);
+    void BuildMenus();
     void OpenPage(int index);
     void ShowConnectStep();
+    void ShowAccountMenu(wxPoint where);
+    void ShowAbout();
 
     void OnContinue();
     void OnPair();
@@ -76,6 +79,7 @@ private:
     void Refresh();
     void Populate();
     std::optional<std::string> SelectedFolder() const;
+    void UpdateFolderButtons();
     void OnChooseLocal();
     void OnStop();
     void OnNewFolder();
@@ -91,8 +95,7 @@ private:
 
     wxSimplebook* book_ = nullptr;
     wxSimplebook* pages_ = nullptr;
-    wxListBox* navigation_ = nullptr;
-    wxStaticText* profile_label_ = nullptr;
+    ui::Sidebar* sidebar_ = nullptr;
     wxTimer timer_;
     wxTimer settle_;
     std::string profile_token_;
@@ -103,6 +106,7 @@ private:
     // Connect page.
     wxTextCtrl* server_ = nullptr;
     wxButton* continue_ = nullptr;
+    wxButton* back_ = nullptr;
     wxPanel* signin_ = nullptr;
     wxStaticText* server_name_ = nullptr;
     wxTextCtrl* username_ = nullptr;
@@ -111,7 +115,7 @@ private:
     wxPanel* pairing_panel_ = nullptr;
     wxStaticText* user_code_ = nullptr;
     wxString approval_url_;
-    wxStaticText* connect_status_ = nullptr;
+    ui::Status* connect_status_ = nullptr;
     wxStaticText* http_warning_ = nullptr;
     std::optional<std::string> discovered_;
     std::shared_ptr<std::atomic<bool>> pairing_alive_;
@@ -121,7 +125,9 @@ private:
     wxGauge* quota_ = nullptr;
     wxStaticText* quota_text_ = nullptr;
     wxListCtrl* list_ = nullptr;
-    wxStaticText* status_ = nullptr;
+    wxButton* choose_local_ = nullptr;
+    wxButton* stop_ = nullptr;
+    ui::Status* status_ = nullptr;
     std::vector<Folder> folders_;
 };
 

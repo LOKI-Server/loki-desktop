@@ -1,7 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
+- Refresh the window: a dark LOKI sidebar with the signed-in account at the bottom, page headers with each page's main actions, and buttons that only appear when they apply.
+- Replace the single **More** menu with **File**, **View**, **Account**, and **Help**. **View** switches pages with Ctrl+1 to Ctrl+4, and **Help → About LOKI Client** shows the version.
+- Click the account in the sidebar to open LOKI in your browser, reconnect, or sign out.
+- Center the connect screen, and sign in by pressing Enter in the password or code field.
+- Show errors in red and completed downloads in green, wrapped to the window width.
+- Open Save sync first when the account can sync.
+- Ask before you stop syncing a folder on this computer.
+- Show repositories as clone or link actions until they are on this computer, then as commit, pull, push, and fetch.
+- Hide the file browser's Previous and Next buttons unless a folder has more than one page.
 - Show who owns each repository, as "owner / name", for LOKI Server 0.9 groups.
 - Choose a group to own a new or published repository when the server allows it.
 - Mention repository transfers waiting for you; accept or decline them in the LOKI dashboard.

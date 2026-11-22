@@ -10,6 +10,7 @@
 
 #include "apps_api.hpp"
 #include "commands.hpp"
+#include "ui.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -26,11 +27,12 @@ std::string U(const wxString& text) { return text.utf8_string(); }
 
 class AsyncPage : public wxPanel {
 public:
-    AsyncPage(wxWindow* parent, Store& store, const char* title) : wxPanel(parent), store_(store) {
+    AsyncPage(wxWindow* parent, Store& store, const wxString& title, const wxString& subtitle)
+        : wxPanel(parent), store_(store) {
         layout_ = new wxBoxSizer(wxVERTICAL);
-        auto* heading = new wxStaticText(this, wxID_ANY, title);
-        heading->SetFont(heading->GetFont().Scaled(1.6f).Bold());
-        layout_->Add(heading, 0, wxBOTTOM, FromDIP(12));
+        auto header = ui::page_header(this, title, subtitle);
+        actions_ = header.actions;
+        layout_->Add(header.sizer, 0, wxEXPAND | wxBOTTOM, FromDIP(16));
     }
     ~AsyncPage() override { *alive_ = false; }
     bool Busy() const { return busy_; }
@@ -50,24 +52,21 @@ protected:
     virtual void Controls() = 0;
 
     void FinishLayout() {
-        status_ = new wxStaticText(this, wxID_ANY, "");
-        layout_->Add(status_, 0, wxEXPAND | wxTOP, FromDIP(8));
+        status_ = new ui::Status(this);
+        layout_->Add(status_, 0, wxEXPAND | wxTOP, FromDIP(10));
         auto* outer = new wxBoxSizer(wxVERTICAL);
-        outer->Add(layout_, 1, wxEXPAND | wxALL, FromDIP(16));
+        outer->Add(layout_, 1, wxEXPAND | wxALL, FromDIP(24));
         SetSizer(outer);
     }
 
-    wxButton* Button(wxBoxSizer* row, const wxString& title, const std::function<void()>& action) {
-        auto* button = new wxButton(this, wxID_ANY, title);
-        button->Bind(wxEVT_BUTTON, [action](wxCommandEvent&) { action(); });
-        row->Add(button, 0, wxRIGHT, FromDIP(6));
-        return button;
+    wxButton* Button(wxSizer* row, const wxString& title, std::function<void()> action) {
+        return ui::button(this, row, title, std::move(action));
     }
 
     void Work(const wxString& working, std::function<void()> job, std::function<void()> done) {
         if (busy_) return;
         busy_ = true;
-        status_->SetLabel(working);
+        status_->Info(working);
         Controls();
         const auto alive = alive_;
         const auto session = session_;
@@ -81,18 +80,19 @@ protected:
                 if (!*alive) return;
                 busy_ = false;
                 if (session != session_ || session != store_.token()) {
-                    status_->SetLabel("");
+                    status_->Clear();
                     Controls();
                     Layout();
                     if (refresh_queued_) { refresh_queued_ = false; RefreshData(); }
                     return;
                 }
-                status_->SetLabel(W(error));
                 if (error.empty()) {
+                    status_->Clear();
                     try { done(); }
-                    catch (const std::exception& e) { status_->SetLabel(W(e.what())); }
+                    catch (const std::exception& e) { status_->Error(W(e.what())); }
+                } else {
+                    status_->Error(W(error));
                 }
-                status_->Wrap(std::max(200, GetClientSize().GetWidth() - FromDIP(32)));
                 Controls();
                 Layout();
             });
@@ -101,7 +101,8 @@ protected:
 
     Store& store_;
     wxBoxSizer* layout_;
-    wxStaticText* status_;
+    wxBoxSizer* actions_;
+    ui::Status* status_;
     std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
     bool busy_ = false;
 private:
@@ -111,9 +112,23 @@ private:
 
 class AppsPage : public AsyncPage {
 public:
-    AppsPage(wxWindow* parent, Store& store) : AsyncPage(parent, store, "Apps") {
+    AppsPage(wxWindow* parent, Store& store)
+        : AsyncPage(parent, store, "Apps", "Builds published in the app repositories shared with you") {
+        refresh_ = Button(actions_, "Check for updates", [this] { RefreshData(); });
+        list_ = new wxListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
+        for (const auto& [label, width] : std::vector<std::pair<const char*,int>>{
+            {"App", 190}, {"Repository", 150}, {"Version", 90}, {"Status", 150}, {"Package", 170}})
+            list_->AppendColumn(label, wxLIST_FORMAT_LEFT, FromDIP(width));
+        ui::fill_last_column(list_);
+        list_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent&) { Controls(); });
+        list_->Bind(wxEVT_LIST_ITEM_DESELECTED, [this](wxListEvent&) { Controls(); });
+        list_->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) { Download(); });
+        layout_->Add(list_, 1, wxEXPAND);
+        progress_ = new wxGauge(this, wxID_ANY, 1000, wxDefaultPosition, FromDIP(wxSize(-1, 6)));
+        layout_->Add(progress_, 0, wxEXPAND | wxTOP, FromDIP(10));
+        progress_->Hide();
+        // Actions for the selected app.
         auto* toolbar = new wxBoxSizer(wxHORIZONTAL);
-        refresh_ = Button(toolbar, "Check for updates", [this] { RefreshData(); });
         download_ = Button(toolbar, "Download", [this] { Download(); });
         open_ = Button(toolbar, "Open download folder", [this] {
             if (const auto* app = Selected(); app && !app->downloaded.empty())
@@ -121,17 +136,7 @@ public:
         });
         cancel_ = Button(toolbar, "Cancel download", [this] { *cancelled_ = true; cancel_->Disable(); });
         cancel_->Hide();
-        layout_->Add(toolbar, 0, wxEXPAND | wxBOTTOM, FromDIP(10));
-        list_ = new wxListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
-        for (const auto& [label, width] : std::vector<std::pair<const char*,int>>{
-            {"App", 175}, {"Repository", 145}, {"Version", 85}, {"Status", 150}, {"Package", 165}})
-            list_->AppendColumn(label, wxLIST_FORMAT_LEFT, FromDIP(width));
-        list_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent&) { Controls(); });
-        list_->Bind(wxEVT_LIST_ITEM_DESELECTED, [this](wxListEvent&) { Controls(); });
-        layout_->Add(list_, 1, wxEXPAND);
-        progress_ = new wxGauge(this, wxID_ANY, 1000);
-        layout_->Add(progress_, 0, wxEXPAND | wxTOP, FromDIP(8));
-        progress_->Hide();
+        layout_->Add(toolbar, 0, wxTOP, FromDIP(10));
         FinishLayout();
         Controls();
     }
@@ -173,8 +178,8 @@ private:
                 if (app.build) list_->SetItem(row, 4, W(app.build->filename));
                 if (selected_id == app.repository.id + "/" + app.app.id) list_->SetItemState(row, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
             }
-            if (!result->errors.empty()) status_->SetLabel(W(result->errors.front()));
-            else if (apps_.empty()) status_->SetLabel("No apps found. Ask the server owner to share an app repository.");
+            if (!result->errors.empty()) status_->Error(W(result->errors.front()));
+            else if (apps_.empty()) status_->Info("No apps yet. Ask the server owner to share an app repository with you.");
         });
     }
 
@@ -186,10 +191,11 @@ private:
         download_->SetLabel(app && app->update ? "Update" : app && !app->downloaded.empty() ? "Download again" : "Download");
         open_->Enable(!busy_ && app && !app->downloaded.empty());
         list_->Enable(!busy_);
-        if (app && !app->check_error.empty() && !busy_ && status_->GetLabel().empty()) status_->SetLabel(W(app->check_error));
-        if (!busy_) {
+        if (app && !app->check_error.empty() && !busy_ && status_->GetLabel().empty()) status_->Error(W(app->check_error));
+        if (!busy_ && (progress_->IsShown() || cancel_->IsShown())) {
             progress_->Hide();
             cancel_->Hide();
+            Layout();
         }
     }
 
@@ -237,36 +243,49 @@ private:
 
 class RepositoryPage : public AsyncPage {
 public:
-    RepositoryPage(wxWindow* parent, Store& store) : AsyncPage(parent, store, "Repositories") {
-        auto* top = new wxBoxSizer(wxHORIZONTAL);
-        refresh_ = Button(top, "Refresh", [this] { RefreshData(); });
-        create_ = Button(top, wxS("New repository…"), [this] { Create(false); });
-        publish_ = Button(top, wxS("Publish local repository…"), [this] { Create(true); });
-        layout_->Add(top, 0, wxEXPAND | wxBOTTOM, FromDIP(10));
+    RepositoryPage(wxWindow* parent, Store& store)
+        : AsyncPage(parent, store, "Repositories", "Private Skald repositories on your LOKI server") {
+        refresh_ = Button(actions_, "Refresh", [this] { RefreshData(); });
+        publish_ = Button(actions_, wxS("Publish local…"), [this] { Create(true); });
+        create_ = Button(actions_, wxS("New repository…"), [this] { Create(false); });
 
         auto* columns = new wxBoxSizer(wxHORIZONTAL);
-        list_ = new wxListBox(this, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(185, 285)), 0, nullptr, wxLB_SINGLE);
+        list_ = new wxListBox(this, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(230, -1)), 0, nullptr, wxLB_SINGLE);
         list_->Bind(wxEVT_LISTBOX, [this](wxCommandEvent&) { ShowRepository(); });
-        columns->Add(list_, 0, wxEXPAND | wxRIGHT, FromDIP(12));
+        columns->Add(list_, 0, wxEXPAND | wxRIGHT, FromDIP(20));
+
         auto* details = new wxBoxSizer(wxVERTICAL);
-        heading_ = new wxStaticText(this, wxID_ANY, "Select a repository");
-        heading_->SetFont(heading_->GetFont().Scaled(1.15f).Bold());
-        details->Add(heading_, 0, wxEXPAND | wxBOTTOM, FromDIP(6));
-        folder_label_ = new wxTextCtrl(this, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxTE_READONLY);
-        details->Add(folder_label_, 0, wxEXPAND | wxBOTTOM, FromDIP(8));
-        auto* local = new wxBoxSizer(wxHORIZONTAL);
-        clone_ = Button(local, wxS("Clone…"), [this] { Clone(); });
-        link_ = Button(local, wxS("Link local folder…"), [this] { Link(); });
-        open_ = Button(local, "Open folder", [this] {
+        heading_ = new wxStaticText(this, wxID_ANY, "");
+        heading_->SetFont(heading_->GetFont().Scaled(1.3f).Bold());
+        details->Add(heading_, 0, wxEXPAND);
+        role_ = new wxStaticText(this, wxID_ANY, "");
+        role_->SetForegroundColour(ui::muted());
+        details->Add(role_, 0, wxEXPAND | wxTOP, FromDIP(2));
+        folder_label_ = new wxStaticText(this, wxID_ANY, "", wxDefaultPosition, wxDefaultSize,
+                                         wxST_ELLIPSIZE_MIDDLE | wxST_NO_AUTORESIZE);
+        details->Add(folder_label_, 0, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(12));
+
+        // Before the repository is on this computer: get it here.
+        local_ = new wxBoxSizer(wxHORIZONTAL);
+        clone_ = Button(local_, wxS("Clone…"), [this] { Clone(); });
+        link_ = Button(local_, wxS("Link existing folder…"), [this] { Link(); });
+        details->Add(local_, 0, wxBOTTOM, FromDIP(12));
+
+        // Once it is: work with it.
+        working_ = new wxBoxSizer(wxHORIZONTAL);
+        commit_ = Button(working_, wxS("Commit all changes…"), [this] { Commit(); });
+        pull_ = Button(working_, "Pull", [this] { Transfer(RepositoryTransfer::Pull); });
+        push_ = Button(working_, "Push", [this] { Transfer(RepositoryTransfer::Push); });
+        fetch_ = Button(working_, "Fetch", [this] { Transfer(RepositoryTransfer::Fetch); });
+        working_->AddStretchSpacer();
+        open_ = Button(working_, "Open folder", [this] {
             if (!folder_.empty()) wxLaunchDefaultApplication(W(path_utf8(folder_)));
         });
-        details->Add(local, 0, wxEXPAND | wxBOTTOM, FromDIP(6));
-        auto* transfers = new wxBoxSizer(wxHORIZONTAL);
-        fetch_ = Button(transfers, "Fetch", [this] { Transfer(RepositoryTransfer::Fetch); });
-        pull_ = Button(transfers, "Pull", [this] { Transfer(RepositoryTransfer::Pull); });
-        push_ = Button(transfers, "Push", [this] { Transfer(RepositoryTransfer::Push); });
-        commit_ = Button(transfers, wxS("Commit all changes…"), [this] { Commit(); });
-        details->Add(transfers, 0, wxEXPAND | wxBOTTOM, FromDIP(8));
+        details->Add(working_, 0, wxEXPAND | wxBOTTOM, FromDIP(12));
+
+        changes_title_ = new wxStaticText(this, wxID_ANY, "Changes");
+        changes_title_->SetFont(changes_title_->GetFont().Bold());
+        details->Add(changes_title_, 0, wxBOTTOM, FromDIP(4));
         changes_ = new wxTextCtrl(this, wxID_ANY, "", wxDefaultPosition, wxDefaultSize,
                                   wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP);
         auto font = changes_->GetFont();
@@ -275,11 +294,12 @@ public:
         details->Add(changes_, 1, wxEXPAND);
         columns->Add(details, 1, wxEXPAND);
         layout_->Add(columns, 1, wxEXPAND);
-        progress_ = new wxGauge(this, wxID_ANY, 100);
-        layout_->Add(progress_, 0, wxEXPAND | wxTOP, FromDIP(8));
+        progress_ = new wxGauge(this, wxID_ANY, 100, wxDefaultPosition, FromDIP(wxSize(-1, 6)));
+        layout_->Add(progress_, 0, wxEXPAND | wxTOP, FromDIP(10));
         progress_->Hide();
         Bind(wxEVT_TIMER, [this](wxTimerEvent&) { progress_->Pulse(); }, progress_timer_.GetId());
         FinishLayout();
+        ShowDetails();
         Controls();
     }
 
@@ -294,8 +314,7 @@ private:
         list_->Clear();
         folder_.clear();
         changes_->Clear();
-        heading_->SetLabel("Select a repository");
-        folder_label_->Clear();
+        ShowDetails();
     }
 
     void RefreshData() override {
@@ -319,10 +338,11 @@ private:
             }
             list_->SetSelection(index);
             if (result->transfers_waiting)
-                status_->SetLabel(W(std::to_string(result->transfers_waiting) +
-                    (result->transfers_waiting == 1 ? " repository transfer is" : " repository transfers are") +
-                    " waiting for you. Accept or decline it on the Repositories page of LOKI in your browser."));
-            else if (index == wxNOT_FOUND) status_->SetLabel("You have no repositories yet.");
+                status_->Info(W(result->transfers_waiting == 1
+                    ? std::string("A repository transfer is waiting for you. Accept or decline it on the "
+                                  "Repositories page of LOKI in your browser.")
+                    : std::to_string(result->transfers_waiting) + " repository transfers are waiting for you. Accept "
+                      "or decline them on the Repositories page of LOKI in your browser."));
             ShowRepository();
         });
     }
@@ -356,16 +376,39 @@ private:
     void ShowRepository() {
         folder_.clear();
         changes_->Clear();
-        const auto* repo = Selected();
-        heading_->SetLabel(repo ? W(repo->label() + " · " + repo->role) : wxString("Select a repository"));
-        if (repo) folder_ = repository_folder(store_, repo->id);
-        folder_label_->SetValue(folder_.empty() ? wxString("Clone or link a local Skald folder") : W(path_utf8(folder_)));
+        if (const auto* repo = Selected()) folder_ = repository_folder(store_, repo->id);
+        ShowDetails();
         Controls();
         if (folder_.empty() || !fs::is_directory(folder_)) return;
         const auto output = std::make_shared<std::string>();
         Work(wxS("Reading working tree…"), [folder = folder_, output] { *output = repository_status(folder); }, [this, output] {
             changes_->SetValue(W(*output));
         });
+    }
+
+    /** Fills the right-hand side for the selected repository, or explains what to do without one. */
+    void ShowDetails() {
+        const auto* repo = Selected();
+        const bool linked = repo && !folder_.empty() && fs::is_directory(folder_);
+        if (!repo) {
+            heading_->SetLabel(repositories_.empty() ? "No repositories yet" : "Select a repository");
+            role_->SetLabel(repositories_.empty()
+                ? wxS("Create one with New repository, or publish a Skald folder you already have.")
+                : wxS(""));
+        } else {
+            heading_->SetLabel(W(repo->label()));
+            role_->SetLabel(repo->role == "manage" ? "You manage this repository"
+                            : repo->role == "write" ? "You can push changes" : "Read only");
+        }
+        folder_label_->SetLabel(!repo ? wxString()
+            : linked ? W("On this computer at " + path_utf8(folder_))
+            : wxString("Not on this computer yet. Clone it, or link a Skald folder that already has it."));
+        folder_label_->Show(repo != nullptr);
+        local_->ShowItems(repo && !linked);
+        working_->ShowItems(linked);
+        changes_title_->Show(linked);
+        changes_->Show(linked);
+        Layout();
     }
 
     void Create(bool publish) {
@@ -375,11 +418,13 @@ private:
         if (owners_.size() > 1) {
             wxArrayString labels;
             for (const auto& owner : owners_) labels.Add(W(owner.label));
-            wxSingleChoiceDialog owner(this, "Who should own the new repository?", "Create private repository", labels);
+            wxSingleChoiceDialog owner(this, "Who should own the new repository?",
+                                       publish ? "Publish local repository" : "New repository", labels);
             if (owner.ShowModal() != wxID_OK) return;
             group = owners_[size_t(owner.GetSelection())].group;
         }
-        wxTextEntryDialog name(this, "Repository name", "Create private repository");
+        wxTextEntryDialog name(this, "Repository name (lowercase letters, digits, and dashes)",
+                               publish ? "Publish local repository" : "New repository");
         if (name.ShowModal() != wxID_OK || name.GetValue().Trim().empty()) return;
         const auto text = U(name.GetValue().Trim());
         std::optional<fs::path> folder;
@@ -402,8 +447,10 @@ private:
         wxDirDialog choose(this, "Choose the parent directory for the clone");
         if (choose.ShowModal() != wxID_OK) return;
         const auto parent = path_from_utf8(U(choose.GetPath()));
-        if (repo->name.empty() || repo->name.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-") != std::string::npos)
-            throw std::runtime_error("The repository name cannot be used as a local folder.");
+        if (repo->name.empty() || repo->name.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-") != std::string::npos) {
+            status_->Error("The repository name cannot be used as a local folder.");
+            return;
+        }
         const auto folder = parent / path_from_utf8(repo->name);
         Work(wxS("Cloning repository…"), [directory = store_.directory(), id = repo->id, folder] {
             Store store(directory);
@@ -447,8 +494,9 @@ private:
     }
 
     wxListBox* list_;
-    wxStaticText* heading_;
-    wxTextCtrl *folder_label_, *changes_;
+    wxStaticText *heading_, *role_, *folder_label_, *changes_title_;
+    wxTextCtrl* changes_;
+    wxBoxSizer *local_, *working_;
     wxButton *refresh_, *create_, *publish_, *clone_, *link_, *open_, *fetch_, *pull_, *push_, *commit_;
     wxGauge* progress_;
     wxTimer progress_timer_{this};

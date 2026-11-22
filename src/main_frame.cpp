@@ -1,10 +1,12 @@
 #include "main_frame.hpp"
 
+#include <wx/aboutdlg.h>
 #include <wx/dirdlg.h>
 #include <wx/filename.h>
 #include <wx/iconbndl.h>
 #include <wx/numdlg.h>
 #include <wx/platinfo.h>
+#include <wx/statline.h>
 #include <wx/stdpaths.h>
 #include <wx/utils.h>
 #ifdef __WXMSW__
@@ -58,30 +60,20 @@ wxString when(std::int64_t ms) {
     return wxDateTime(wxLongLong(ms)).Format("%Y-%m-%d %H:%M");
 }
 
-/** A small world-tree glyph in LOKI green, drawn rather than shipped as a file. */
-wxIcon tree_icon(int size) {
-    wxBitmap bitmap(size, size, 32);
-    bitmap.UseAlpha();
-    {
-        wxMemoryDC dc(bitmap);
-        dc.SetBackground(wxBrush(wxColour(8, 14, 11)));
-        dc.Clear();
-        const double s = size / 32.0;
-        dc.SetPen(wxPen(wxColour(125, 231, 167), std::max(2, int(3 * s)), wxPENSTYLE_SOLID));
-        auto line = [&](double x1, double y1, double x2, double y2) {
-            dc.DrawLine(int(x1 * s), int(y1 * s), int(x2 * s), int(y2 * s));
-        };
-        line(16, 27, 16, 6);
-        line(16, 13, 9, 7);
-        line(16, 13, 23, 7);
-        line(16, 20, 10, 15);
-        line(16, 20, 22, 15);
-        line(11, 27, 21, 27);
-    }
-    wxIcon icon;
-    icon.CopyFromBitmap(bitmap);
-    return icon;
-}
+using ui::tree_icon;
+
+// Menu commands shared by the menu bar, the account menu, and the tray.
+enum Command {
+    kBrowseFiles = wxID_HIGHEST + 1,
+    kNewFolder,
+    kOpenDashboard,
+    kReconnect,
+    kSignOut,
+    kAutostart,
+    kCheckUpdates,
+    kFirstPage,  // One command per page follows.
+};
+const wxString kPages[] = {"Save sync", "Browse files", "Apps", "Repositories"};
 
 class Tray : public wxTaskBarIcon {
 public:
@@ -94,14 +86,13 @@ protected:
         auto* menu = new wxMenu;
         menu->Append(wxID_OPEN, "Open LOKI Client");
         menu->Append(wxID_REFRESH, "Sync now");
-        const auto browse = wxWindow::NewControlId();
-        menu->Append(browse, wxS("Browse files…"));
+        menu->Append(kBrowseFiles, wxS("Browse files…"));
         menu->AppendSeparator();
         menu->Append(wxID_EXIT, "Quit");
-        menu->Bind(wxEVT_MENU, [this, browse](wxCommandEvent& e) {
+        menu->Bind(wxEVT_MENU, [this](wxCommandEvent& e) {
             if (e.GetId() == wxID_OPEN) frame_->ShowWindow();
             if (e.GetId() == wxID_REFRESH) frame_->SyncNow();
-            if (e.GetId() == browse) frame_->BrowseFiles();
+            if (e.GetId() == kBrowseFiles) frame_->BrowseFiles();
             if (e.GetId() == wxID_EXIT) frame_->Quit();
         });
         return menu;
@@ -120,48 +111,8 @@ MainFrame::MainFrame(Store& store)
     for (const int size : {16, 24, 32, 48, 64}) icons.AddIcon(tree_icon(size));
     SetIcons(icons);
     SetMinSize(FromDIP(wxSize(850, 520)));
-    auto* menus = new wxMenuBar;
-    auto* app_menu = new wxMenu;
-    const auto browse = wxWindow::NewControlId();
-    app_menu->Append(browse, wxS("Browse files…"));
-    const auto commands = wxWindow::NewControlId();
-    app_menu->Append(commands, wxS("Repositories"));
-    const auto connect = wxWindow::NewControlId();
-    app_menu->Append(connect, wxS("Reconnect to LOKI…"));
-    app_menu->Append(wxID_REFRESH, "Sync now");
-#ifdef __WXMSW__
-#ifdef LOKI_HAS_SKALD
-    update_menu_id_ = wxWindow::NewControlId();
-    app_menu->Append(update_menu_id_, wxS("Check for client updates…"));
-    Bind(wxEVT_MENU, [this](wxCommandEvent&) { CheckClientUpdates(true); }, update_menu_id_);
-#endif
-    const auto autostart = wxWindow::NewControlId();
-    app_menu->AppendCheckItem(autostart, "Start at sign-in");
-    // Keep the entry pointing at this copy, in case the app was moved since it was set.
-
-    app_menu->Check(autostart, starts_at_sign_in());
-    Bind(wxEVT_MENU, [this, autostart](wxCommandEvent& e) {
-        try { set_start_at_sign_in(e.IsChecked()); }
-        catch (const std::exception& error) { wxMessageBox(W(error.what()), "Start at sign-in", wxICON_ERROR, this); }
-        GetMenuBar()->Check(autostart, starts_at_sign_in());
-    }, autostart);
-#endif
-    app_menu->AppendSeparator();
-    app_menu->Append(wxID_EXIT, "Quit");
-    menus->Append(app_menu, "&More");
-    SetMenuBar(menus);
-    Bind(wxEVT_MENU, [this](wxCommandEvent&) { BrowseFiles(); }, browse);
-    Bind(wxEVT_MENU, [this](wxCommandEvent&) { if (store_.signed_in()) OpenPage(3); }, commands);
-    Bind(wxEVT_MENU, [this](wxCommandEvent&) {
-        if (!store_.signed_in()) return;
-        if (pairing_alive_) *pairing_alive_ = false;
-        server_->SetValue(W(store_.server()));
-        discovered_ = store_.server();
-        ShowConnectStep();
-        book_->SetSelection(0);
-    }, connect);
-    Bind(wxEVT_MENU, [this](wxCommandEvent&) { SyncNow(); }, wxID_REFRESH);
-    Bind(wxEVT_MENU, [this](wxCommandEvent&) { Quit(); }, wxID_EXIT);
+    SetBackgroundColour(ui::page_background());
+    BuildMenus();
     book_ = new wxSimplebook(this);
     book_->AddPage(BuildConnect(book_), "Connect");
     book_->AddPage(BuildWorkspace(book_), "Workspace");
@@ -200,7 +151,7 @@ MainFrame::MainFrame(Store& store)
         SyncNow();
         StartWatching();
         // The file watcher needs a running event loop.
-        CallAfter([this] { WatchFolders(); OpenPage(1); });
+        CallAfter([this] { WatchFolders(); OpenPage(store_.can_sync() ? 0 : 1); });
     } else {
         book_->SetSelection(0);
         server_->SetValue(W(store_.server()));
@@ -213,6 +164,101 @@ MainFrame::MainFrame(Store& store)
     }, updates_.GetId());
     updates_.StartOnce(3000);
 #endif
+}
+
+void MainFrame::BuildMenus() {
+    auto* file = new wxMenu;
+    file->Append(wxID_REFRESH, "&Sync now\tCtrl+R");
+    file->Append(kNewFolder, wxS("&New sync folder…"));
+#ifdef __WXMSW__
+    file->AppendSeparator();
+    file->AppendCheckItem(kAutostart, "Start at sign-&in");
+    file->Check(kAutostart, starts_at_sign_in());
+    Bind(wxEVT_MENU, [this](wxCommandEvent& e) {
+        try { set_start_at_sign_in(e.IsChecked()); }
+        catch (const std::exception& error) { wxMessageBox(W(error.what()), "Start at sign-in", wxICON_ERROR, this); }
+        GetMenuBar()->Check(kAutostart, starts_at_sign_in());
+    }, kAutostart);
+#endif
+    file->AppendSeparator();
+    file->Append(wxID_CLOSE, "&Close window\tCtrl+W");
+    file->Append(wxID_EXIT, "&Quit\tCtrl+Q");
+
+    auto* view = new wxMenu;
+    for (int i = 0; i < 4; ++i)
+        view->Append(kFirstPage + i, wxString::Format("%s\tCtrl+%d", kPages[i], i + 1));
+
+    auto* account = new wxMenu;
+    account->Append(kOpenDashboard, "Open LOKI in your &browser");
+    account->Append(kReconnect, wxS("&Reconnect to LOKI…"));
+    account->AppendSeparator();
+    account->Append(kSignOut, wxS("&Sign out…"));
+
+    auto* help = new wxMenu;
+#if defined(__WXMSW__) && defined(LOKI_HAS_SKALD)
+    update_menu_id_ = kCheckUpdates;
+    help->Append(kCheckUpdates, wxS("Check for client &updates…"));
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { CheckClientUpdates(true); }, kCheckUpdates);
+    help->AppendSeparator();
+#endif
+    help->Append(wxID_ABOUT, "&About LOKI Client");
+
+    auto* bar = new wxMenuBar;
+    bar->Append(file, "&File");
+    bar->Append(view, "&View");
+    bar->Append(account, "&Account");
+    bar->Append(help, "&Help");
+    SetMenuBar(bar);
+
+    // Account commands only make sense once signed in.
+    Bind(wxEVT_MENU_OPEN, [this](wxMenuEvent& e) {
+        e.Skip();
+        const bool signed_in = store_.signed_in();
+        auto* menus = GetMenuBar();
+        for (const int id : {int(wxID_REFRESH), int(kNewFolder), int(kOpenDashboard), int(kReconnect), int(kSignOut)})
+            menus->Enable(id, signed_in);
+        for (int i = 0; i < 4; ++i) menus->Enable(kFirstPage + i, signed_in);
+    });
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { Refresh(); SyncNow(); }, wxID_REFRESH);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { if (store_.signed_in()) OnNewFolder(); }, kNewFolder);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { BrowseFiles(); }, kBrowseFiles);
+    Bind(wxEVT_MENU, [this](wxCommandEvent& e) { OpenPage(e.GetId() - kFirstPage); }, kFirstPage, kFirstPage + 3);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) {
+        if (store_.signed_in()) wxLaunchDefaultBrowser(W(store_.server()));
+    }, kOpenDashboard);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) {
+        if (!store_.signed_in()) return;
+        if (pairing_alive_) *pairing_alive_ = false;
+        server_->SetValue(W(store_.server()));
+        discovered_.reset();
+        connect_status_->Clear();
+        ShowConnectStep();
+        book_->SetSelection(0);
+        OnContinue();
+    }, kReconnect);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { if (store_.signed_in()) OnSignOut(); }, kSignOut);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { Close(); }, wxID_CLOSE);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { Quit(); }, wxID_EXIT);
+    Bind(wxEVT_MENU, [this](wxCommandEvent&) { ShowAbout(); }, wxID_ABOUT);
+}
+
+void MainFrame::ShowAccountMenu(wxPoint where) {
+    wxMenu menu;
+    menu.Append(kOpenDashboard, "Open LOKI in your browser");
+    menu.Append(kReconnect, wxS("Reconnect to LOKI…"));
+    menu.AppendSeparator();
+    menu.Append(kSignOut, wxS("Sign out…"));
+    sidebar_->PopupMenu(&menu, where);
+}
+
+void MainFrame::ShowAbout() {
+    wxAboutDialogInfo about;
+    about.SetName("LOKI Client");
+    about.SetVersion(LOKI_CLIENT_VERSION);
+    about.SetDescription("Save sync, shared files, apps, and Skald repositories from your LOKI server.");
+    about.SetWebSite("https://github.com/LOKI-Server/loki-desktop");
+    about.SetIcon(tree_icon(64));
+    wxAboutBox(about, this);
 }
 
 MainFrame::~MainFrame() {
@@ -337,30 +383,17 @@ void MainFrame::BrowseFiles() {
 wxPanel* MainFrame::BuildWorkspace(wxWindow* parent) {
     auto* workspace = new wxPanel(parent);
     auto* row = new wxBoxSizer(wxHORIZONTAL);
-    auto* sidebar = new wxPanel(workspace);
-    sidebar->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
-    auto* column = new wxBoxSizer(wxVERTICAL);
-    auto* brand = new wxStaticText(sidebar, wxID_ANY, "LOKI");
-    brand->SetFont(brand->GetFont().Scaled(1.55f).Bold());
-    column->Add(brand, 0, wxALL, FromDIP(14));
-    navigation_ = new wxListBox(sidebar, wxID_ANY, wxDefaultPosition, FromDIP(wxSize(146, 132)),
-        {"Sync", "Browse", "Apps", "Repositories"}, wxLB_SINGLE | wxBORDER_NONE);
-    navigation_->Bind(wxEVT_LISTBOX, [this](wxCommandEvent& event) { OpenPage(event.GetSelection()); });
-    column->Add(navigation_, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
-    column->AddStretchSpacer();
-    profile_label_ = new wxStaticText(sidebar, wxID_ANY, "");
-    column->Add(profile_label_, 0, wxEXPAND | wxALL, FromDIP(12));
-    auto* sign_out = new wxButton(sidebar, wxID_ANY, "Sign out");
-    sign_out->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { OnSignOut(); });
-    column->Add(sign_out, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
-    sidebar->SetSizer(column);
-    row->Add(sidebar, 0, wxEXPAND);
+    sidebar_ = new ui::Sidebar(workspace, {std::begin(kPages), std::end(kPages)});
+    sidebar_->on_select = [this](int index) { OpenPage(index); };
+    sidebar_->on_account = [this](wxPoint where) { ShowAccountMenu(where); };
+    row->Add(sidebar_, 0, wxEXPAND);
 
     pages_ = new wxSimplebook(workspace);
-    pages_->AddPage(BuildFolders(pages_), "Sync");
-    pages_->AddPage(build_file_browser(pages_, store_), "Browse");
-    pages_->AddPage(build_apps_page(pages_, store_), "Apps");
-    pages_->AddPage(build_repository_page(pages_, store_), "Repositories");
+    pages_->AddPage(BuildFolders(pages_), kPages[0]);
+    pages_->AddPage(build_file_browser(pages_, store_), kPages[1]);
+    pages_->AddPage(build_apps_page(pages_, store_), kPages[2]);
+    pages_->AddPage(build_repository_page(pages_, store_), kPages[3]);
+    for (size_t i = 0; i < pages_->GetPageCount(); ++i) pages_->GetPage(i)->SetBackgroundColour(ui::page_background());
     row->Add(pages_, 1, wxEXPAND);
     workspace->SetSizer(row);
     return workspace;
@@ -370,8 +403,8 @@ void MainFrame::OpenPage(int index) {
     if (index < 0 || index > 3 || !store_.signed_in()) return;
     book_->SetSelection(1);
     pages_->SetSelection(index);
-    navigation_->SetSelection(index);
-    profile_label_->SetLabel(W(store_.display_name()));
+    sidebar_->Select(index);
+    sidebar_->SetAccount(W(store_.display_name()), W(store_.server()));
     switch (index) {
         case 1: activate_file_browser(static_cast<wxPanel*>(pages_->GetPage(1))); break;
         case 2: activate_apps_page(static_cast<wxPanel*>(pages_->GetPage(2))); break;
@@ -384,29 +417,29 @@ void MainFrame::OpenPage(int index) {
 
 wxPanel* MainFrame::BuildConnect(wxWindow* parent) {
     auto* page = new wxPanel(parent);
+    page->SetBackgroundColour(ui::page_background());
     auto* column = new wxBoxSizer(wxVERTICAL);
+    column->Add(new wxStaticBitmap(page, wxID_ANY, ui::tree_bitmap(FromDIP(44), wxColour(14, 22, 18))), 0,
+                wxBOTTOM, FromDIP(16));
     auto* title = new wxStaticText(page, wxID_ANY, "Connect to LOKI");
     title->SetFont(title->GetFont().Scaled(1.6f).Bold());
-    column->Add(title, 0, wxBOTTOM, FromDIP(6));
-    column->Add(new wxStaticText(page, wxID_ANY,
-                                 "Keep emulator saves and other folders the same on every device, with every earlier "
-                                 "version kept on your server."),
-                0, wxBOTTOM, FromDIP(16));
+    column->Add(title, 0, wxBOTTOM, FromDIP(4));
+    column->Add(ui::paragraph(page, "Sync emulator saves and other folders, browse shared files, and work with "
+                                    "repositories on your own LOKI server.", ui::muted()),
+                0, wxEXPAND | wxBOTTOM, FromDIP(20));
 
-    column->Add(new wxStaticText(page, wxID_ANY, "Server address"));
+    column->Add(new wxStaticText(page, wxID_ANY, "Server address"), 0, wxBOTTOM, FromDIP(4));
     auto* row = new wxBoxSizer(wxHORIZONTAL);
     server_ = new wxTextCtrl(page, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
     server_->SetHint("loki.example.com");
     continue_ = new wxButton(page, wxID_ANY, "Continue");
-    row->Add(server_, 1, wxRIGHT, FromDIP(8));
-    row->Add(continue_);
-    column->Add(row, 0, wxEXPAND | wxBOTTOM, FromDIP(16));
+    row->Add(server_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    row->Add(continue_, 0, wxALIGN_CENTER_VERTICAL);
+    column->Add(row, 0, wxEXPAND | wxBOTTOM, FromDIP(8));
     server_->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { OnContinue(); });
-    http_warning_ = new wxStaticText(page, wxID_ANY, kPlainHttpWarning);
-    http_warning_->SetForegroundColour(wxColour(200, 70, 60));
-    http_warning_->Wrap(FromDIP(620));
+    http_warning_ = ui::paragraph(page, kPlainHttpWarning, ui::danger());
     http_warning_->Hide();
-    column->Add(http_warning_, 0, wxBOTTOM, FromDIP(12));
+    column->Add(http_warning_, 0, wxEXPAND | wxBOTTOM, FromDIP(8));
     server_->Bind(wxEVT_TEXT, [this, page](wxCommandEvent& e) {
         http_warning_->Show(plain_http(server_->GetValue()));
         page->Layout();
@@ -417,37 +450,38 @@ wxPanel* MainFrame::BuildConnect(wxWindow* parent) {
     // Sign-in choices, shown once the server answers.
     signin_ = new wxPanel(page);
     auto* signin = new wxBoxSizer(wxVERTICAL);
+    signin->Add(new wxStaticLine(signin_), 0, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(12));
     server_name_ = new wxStaticText(signin_, wxID_ANY, "");
-    server_name_->SetFont(server_name_->GetFont().Bold());
-    signin->Add(server_name_, 0, wxBOTTOM, FromDIP(8));
-    signin->Add(new wxStaticText(signin_, wxID_ANY,
-                                 "Pair this computer by approving a short code in the LOKI dashboard. Your password "
-                                 "never touches this computer."),
-                0, wxBOTTOM, FromDIP(8));
-    auto* back = new wxButton(signin_, wxID_ANY, "Back to saved account");
-    back->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { if (store_.signed_in()) ShowSession(); });
-    signin->Add(back, 0, wxBOTTOM, FromDIP(10));
-    auto* pair = new wxButton(signin_, wxID_ANY, "Pair with a code");
-    pair->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { OnPair(); });
-    signin->Add(pair, 0, wxBOTTOM, FromDIP(16));
+    server_name_->SetFont(server_name_->GetFont().Scaled(1.15f).Bold());
+    signin->Add(server_name_, 0, wxBOTTOM, FromDIP(6));
+    signin->Add(ui::paragraph(signin_, "Pair this computer by approving a short code in the LOKI dashboard. Your "
+                                       "password never touches this computer."),
+                0, wxEXPAND | wxBOTTOM, FromDIP(10));
+    auto* choices = new wxBoxSizer(wxHORIZONTAL);
+    ui::button(signin_, choices, "Pair with a code", [this] { OnPair(); });
+    back_ = ui::button(signin_, choices, "Back to saved account", [this] { if (store_.signed_in()) ShowSession(); });
+    signin->Add(choices, 0, wxBOTTOM, FromDIP(18));
 
     auto* box = new wxStaticBoxSizer(wxVERTICAL, signin_, "Or sign in with a password");
-    auto* grid = new wxFlexGridSizer(2, FromDIP(wxSize(8, 6)));
+    auto* grid = new wxFlexGridSizer(2, FromDIP(wxSize(10, 8)));
     grid->AddGrowableCol(1);
     username_ = new wxTextCtrl(box->GetStaticBox(), wxID_ANY);
-    password_ = new wxTextCtrl(box->GetStaticBox(), wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxTE_PASSWORD);
-    code_ = new wxTextCtrl(box->GetStaticBox(), wxID_ANY);
-    code_->SetHint("only if two-factor authentication is on");
+    password_ = new wxTextCtrl(box->GetStaticBox(), wxID_ANY, "", wxDefaultPosition, wxDefaultSize,
+                               wxTE_PASSWORD | wxTE_PROCESS_ENTER);
+    code_ = new wxTextCtrl(box->GetStaticBox(), wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+    code_->SetHint("Only if two-factor authentication is on");
     grid->Add(new wxStaticText(box->GetStaticBox(), wxID_ANY, "Username or email"), 0, wxALIGN_CENTER_VERTICAL);
     grid->Add(username_, 1, wxEXPAND);
     grid->Add(new wxStaticText(box->GetStaticBox(), wxID_ANY, "Password"), 0, wxALIGN_CENTER_VERTICAL);
     grid->Add(password_, 1, wxEXPAND);
     grid->Add(new wxStaticText(box->GetStaticBox(), wxID_ANY, "Authentication code"), 0, wxALIGN_CENTER_VERTICAL);
     grid->Add(code_, 1, wxEXPAND);
-    box->Add(grid, 0, wxEXPAND | wxALL, FromDIP(8));
+    box->Add(grid, 0, wxEXPAND | wxALL, FromDIP(10));
     auto* login = new wxButton(box->GetStaticBox(), wxID_ANY, "Sign in");
     login->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { OnLogin(); });
-    box->Add(login, 0, wxLEFT | wxBOTTOM, FromDIP(8));
+    password_->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { OnLogin(); });
+    code_->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { OnLogin(); });
+    box->Add(login, 0, wxALIGN_RIGHT | wxRIGHT | wxBOTTOM, FromDIP(10));
     signin->Add(box, 0, wxEXPAND);
     signin_->SetSizer(signin);
     column->Add(signin_, 0, wxEXPAND);
@@ -455,32 +489,38 @@ wxPanel* MainFrame::BuildConnect(wxWindow* parent) {
     // The code to approve, while pairing.
     pairing_panel_ = new wxPanel(page);
     auto* pairing = new wxBoxSizer(wxVERTICAL);
-    pairing->Add(new wxStaticText(pairing_panel_, wxID_ANY,
-                                  wxS("Approve this code in the LOKI dashboard: Account → Devices → Pair a device.")),
-                 0, wxBOTTOM, FromDIP(8));
+    pairing->Add(new wxStaticLine(pairing_panel_), 0, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(12));
+    pairing->Add(ui::paragraph(pairing_panel_,
+                               wxS("Approve this code in the LOKI dashboard under Account → Devices → Pair a device.")),
+                 0, wxEXPAND | wxBOTTOM, FromDIP(10));
     user_code_ = new wxStaticText(pairing_panel_, wxID_ANY, "");
     user_code_->SetFont(wxFont(wxFontInfo(28).Family(wxFONTFAMILY_TELETYPE).Bold()));
-    pairing->Add(user_code_, 0, wxBOTTOM, FromDIP(8));
+    pairing->Add(user_code_, 0, wxBOTTOM, FromDIP(6));
+    pairing->Add(ui::paragraph(pairing_panel_, wxS("Waiting for approval…"), ui::muted()), 0, wxEXPAND | wxBOTTOM,
+                 FromDIP(12));
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
-    auto* open = new wxButton(pairing_panel_, wxID_ANY, "Open approval page");
-    open->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { wxLaunchDefaultBrowser(approval_url_); });
-    auto* cancel = new wxButton(pairing_panel_, wxID_ANY, "Cancel");
-    cancel->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+    ui::button(pairing_panel_, buttons, "Open approval page", [this] { wxLaunchDefaultBrowser(approval_url_); });
+    ui::button(pairing_panel_, buttons, "Cancel", [this] {
         if (pairing_alive_) *pairing_alive_ = false;
         ShowConnectStep();
     });
-    buttons->Add(open, 0, wxRIGHT, FromDIP(8));
-    buttons->Add(cancel);
     pairing->Add(buttons);
     pairing_panel_->SetSizer(pairing);
     column->Add(pairing_panel_, 0, wxEXPAND);
 
-    connect_status_ = new wxStaticText(page, wxID_ANY, "");
-    connect_status_->SetForegroundColour(wxColour(200, 70, 60));
-    column->Add(connect_status_, 0, wxTOP, FromDIP(12));
+    connect_status_ = new ui::Status(page);
+    column->Add(connect_status_, 0, wxEXPAND | wxTOP, FromDIP(12));
 
+    // A readable column in the middle of the window, nearer the top than the bottom.
+    auto* centred = new wxBoxSizer(wxHORIZONTAL);
+    centred->AddStretchSpacer();
+    centred->Add(column, 0, wxEXPAND);
+    centred->AddStretchSpacer();
+    column->SetMinSize(FromDIP(wxSize(520, -1)));
     auto* outer = new wxBoxSizer(wxVERTICAL);
-    outer->Add(column, 1, wxEXPAND | wxALL, FromDIP(24));
+    outer->AddStretchSpacer(1);
+    outer->Add(centred, 0, wxEXPAND | wxALL, FromDIP(24));
+    outer->AddStretchSpacer(2);
     page->SetSizer(outer);
     signin_->Hide();
     pairing_panel_->Hide();
@@ -489,6 +529,7 @@ wxPanel* MainFrame::BuildConnect(wxWindow* parent) {
 
 void MainFrame::ShowConnectStep() {
     signin_->Show(discovered_.has_value());
+    back_->Show(store_.signed_in());
     pairing_panel_->Hide();
     book_->GetPage(0)->Layout();
 }
@@ -497,7 +538,7 @@ void MainFrame::OnContinue() {
     const auto server = U(server_->GetValue());
     if (server.empty()) return;
     continue_->Disable();
-    connect_status_->SetLabel("");
+    connect_status_->Info(wxS("Contacting the server…"));
     auto name = std::make_shared<std::string>();
     auto base = std::make_shared<std::string>();
     Background(
@@ -508,13 +549,14 @@ void MainFrame::OnContinue() {
         },
         [this, name, base](std::optional<std::string> error) {
             continue_->Enable();
+            connect_status_->Clear();
             if (error) {
                 discovered_.reset();
-                connect_status_->SetLabel(W(*error));
+                connect_status_->Error(W(*error));
             } else {
                 discovered_ = *base;
                 server_->SetValue(W(*base));
-                server_name_->SetLabel(W(*name + "  ·  " + *base));
+                server_name_->SetLabel(W(*name));
             }
             ShowConnectStep();
         });
@@ -530,8 +572,8 @@ void MainFrame::OnPair() {
                    *pairing = Desktop(other).pair(server);
                },
                [this, pairing](std::optional<std::string> error) {
-                   if (error) { connect_status_->SetLabel(W(*error)); return; }
-                   connect_status_->SetLabel("");
+                   if (error) { connect_status_->Error(W(*error)); return; }
+                   connect_status_->Clear();
                    user_code_->SetLabel(W(pairing->pairing.user_code));
                    approval_url_ = W(pairing->pairing.verification_uri_complete);
                    signin_->Hide();
@@ -556,7 +598,7 @@ void MainFrame::PollPairing(SignIn pairing) {
         [this, active](std::optional<std::string> error) {
             if (!*active) return;
             if (error) {
-                connect_status_->SetLabel(W(*error));
+                connect_status_->Error(W(*error));
                 ShowConnectStep();
             } else {
                 ProfileChanged();
@@ -571,17 +613,19 @@ void MainFrame::OnLogin() {
     const auto directory = store_.directory();
     password_->Clear();
     code_->Clear();
+    connect_status_->Info(wxS("Signing in…"));
     Background(
         [=] { Store other(directory); Desktop(other).login(server, username, password, code); },
         [this](std::optional<std::string> error) {
-            if (error) { connect_status_->SetLabel(W(*error)); return; }
+            if (error) { connect_status_->Error(W(*error)); return; }
+            connect_status_->Clear();
             ProfileChanged();
         });
 }
 
 void MainFrame::ShowSession() {
     pairing_panel_->Hide();
-    OpenPage(1);
+    OpenPage(store_.can_sync() ? 0 : 1);
     Refresh();
     StartWatching();
     WatchFolders();
@@ -623,7 +667,7 @@ void MainFrame::ProfileChanged() {
             Populate();
         }
     } catch (const std::exception& error) {
-        status_->SetLabel(W(error.what()));
+        status_->Error(W(error.what()));
     }
 }
 
@@ -666,26 +710,24 @@ wxPanel* MainFrame::BuildFolders(wxWindow* parent) {
     auto* page = new wxPanel(parent);
     auto* column = new wxBoxSizer(wxVERTICAL);
 
-    auto* header = new wxBoxSizer(wxHORIZONTAL);
-    auto* titles = new wxBoxSizer(wxVERTICAL);
-    auto* title = new wxStaticText(page, wxID_ANY, "Save sync");
-    title->SetFont(title->GetFont().Scaled(1.6f).Bold());
-    account_ = new wxStaticText(page, wxID_ANY, "");
-    titles->Add(title);
-    titles->Add(account_);
-    header->Add(titles, 1, wxALIGN_CENTER_VERTICAL);
-    column->Add(header, 0, wxEXPAND | wxBOTTOM, FromDIP(12));
+    auto header = ui::page_header(page, "Save sync");
+    account_ = header.subtitle;
+    ui::button(page, header.actions, wxS("New folder…"), [this] { OnNewFolder(); });
+    ui::button(page, header.actions, "Sync now", [this] { Refresh(); SyncNow(); });
+    column->Add(header.sizer, 0, wxEXPAND | wxBOTTOM, FromDIP(16));
 
-    quota_ = new wxGauge(page, wxID_ANY, 1000, wxDefaultPosition, FromDIP(wxSize(-1, 8)));
     quota_text_ = new wxStaticText(page, wxID_ANY, "");
-    column->Add(quota_, 0, wxEXPAND);
-    column->Add(quota_text_, 0, wxTOP | wxBOTTOM, FromDIP(4));
+    quota_text_->SetForegroundColour(ui::muted());
+    column->Add(quota_text_, 0, wxBOTTOM, FromDIP(4));
+    quota_ = new wxGauge(page, wxID_ANY, 1000, wxDefaultPosition, FromDIP(wxSize(-1, 6)));
+    column->Add(quota_, 0, wxEXPAND | wxBOTTOM, FromDIP(14));
 
     list_ = new wxListCtrl(page, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
-    list_->AppendColumn("Folder", wxLIST_FORMAT_LEFT, FromDIP(150));
-    list_->AppendColumn("Holds", wxLIST_FORMAT_LEFT, FromDIP(140));
-    list_->AppendColumn("On this computer", wxLIST_FORMAT_LEFT, FromDIP(230));
-    list_->AppendColumn("Last sync", wxLIST_FORMAT_LEFT, FromDIP(260));
+    list_->AppendColumn("Folder", wxLIST_FORMAT_LEFT, FromDIP(160));
+    list_->AppendColumn("Holds", wxLIST_FORMAT_LEFT, FromDIP(150));
+    list_->AppendColumn("On this computer", wxLIST_FORMAT_LEFT, FromDIP(260));
+    list_->AppendColumn("Last sync", wxLIST_FORMAT_LEFT, FromDIP(200));
+    ui::fill_last_column(list_);
     // wxWidgets rescales fonts and sizers; list column widths are application-owned.
     list_->Bind(wxEVT_DPI_CHANGED, [this](wxDPIChangedEvent& e) {
         for (int i = 0; i < list_->GetColumnCount(); ++i) {
@@ -694,33 +736,29 @@ wxPanel* MainFrame::BuildFolders(wxWindow* parent) {
         e.Skip();
     });
     list_->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) { OnChooseLocal(); });
-    column->Add(list_, 1, wxEXPAND | wxTOP, FromDIP(8));
+    list_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent&) { UpdateFolderButtons(); });
+    list_->Bind(wxEVT_LIST_ITEM_DESELECTED, [this](wxListEvent&) { UpdateFolderButtons(); });
+    column->Add(list_, 1, wxEXPAND);
 
+    // Actions for the selected folder.
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
-    auto add = [&](const wxString& label, std::function<void()> action) {
-        auto* b = new wxButton(page, wxID_ANY, label);
-        b->Bind(wxEVT_BUTTON, [action](wxCommandEvent&) { action(); });
-        buttons->Add(b, 0, wxRIGHT, FromDIP(6));
-    };
-    add(wxS("Choose local folder…"), [this] { OnChooseLocal(); });
-    add("Stop syncing", [this] { OnStop(); });
-    add("Sync now", [this] { SyncNow(); });
-    add(wxS("New server folder…"), [this] { OnNewFolder(); });
-    add("Refresh", [this] { Refresh(); });
-    column->Add(buttons, 0, wxTOP, FromDIP(8));
+    choose_local_ = ui::button(page, buttons, wxS("Choose local folder…"), [this] { OnChooseLocal(); });
+    stop_ = ui::button(page, buttons, "Stop syncing here", [this] { OnStop(); });
+    column->Add(buttons, 0, wxTOP, FromDIP(10));
 
-    status_ = new wxStaticText(page, wxID_ANY, "");
-    column->Add(status_, 0, wxTOP, FromDIP(8));
+    status_ = new ui::Status(page);
+    column->Add(status_, 0, wxEXPAND | wxTOP, FromDIP(10));
 
     auto* outer = new wxBoxSizer(wxVERTICAL);
-    outer->Add(column, 1, wxEXPAND | wxALL, FromDIP(16));
+    outer->Add(column, 1, wxEXPAND | wxALL, FromDIP(24));
     page->SetSizer(outer);
+    UpdateFolderButtons();
     return page;
 }
 
 void MainFrame::Refresh() {
     if (!store_.signed_in()) return;
-    account_->SetLabel(W(store_.display_name() + "  ·  " + store_.server()));
+    account_->SetLabel("Folders kept the same on every device, with earlier versions kept on the server");
     auto folders = std::make_shared<std::vector<Folder>>();
     auto quota = std::make_shared<Quota>();
     auto access = std::make_shared<bool>(true);
@@ -734,14 +772,15 @@ void MainFrame::Refresh() {
         },
         [this, folders, quota, access](std::optional<std::string> error) {
             if (error) {
-                status_->SetLabel(W(*error));
+                status_->Error(W(*error));
                 return;
             }
             store_.set_sync_access(*access);
             if (!*access) {
                 StopWatching(); folders_.clear(); list_->DeleteAllItems(); quota_->SetValue(0);
-                quota_text_->SetLabel(wxS("File sharing is available from More → Browse files."));
-                status_->SetLabel("Your account does not have access to Save sync.");
+                quota_text_->SetLabel("");
+                status_->Info("Your account does not have access to Save sync. Shared files, apps, and "
+                              "repositories are still available from the sidebar.");
                 return;
             }
             if (!watching_ || !*watching_) StartWatching();
@@ -749,7 +788,7 @@ void MainFrame::Refresh() {
             const auto limit = std::max<std::int64_t>(quota->limit, 1);
             quota_->SetValue(int(std::min<std::int64_t>(1000, quota->used * 1000 / limit)));
             quota_text_->SetLabel(size_text(quota->used) + " of " + size_text(quota->limit) +
-                                  " used on the server, including history");
+                                  " used on the server, including every kept version");
             Populate();
         });
 }
@@ -764,17 +803,27 @@ void MainFrame::Populate() {
         list_->SetItem(row, 1, kind_label(f.kind));
         auto m = mappings.find(f.id);
         if (m == mappings.end()) {
-            list_->SetItem(row, 2, wxS("Not synced here — choose a folder"));
-            list_->SetItem(row, 3, "");
+            list_->SetItem(row, 2, wxS("Not on this computer"));
+            list_->SetItemTextColour(row, ui::muted());
         } else {
             list_->SetItem(row, 2, W(path_utf8(m->second.local)));
             list_->SetItem(row, 3, when(m->second.last_sync) + (m->second.last_result.empty() ? wxS("") : wxS(" · ")) +
                                        W(m->second.last_result));
-            if (m->second.failed) list_->SetItemTextColour(row, wxColour(200, 70, 60));
+            if (m->second.failed) list_->SetItemTextColour(row, ui::danger());
         }
         if (selected && *selected == f.id) list_->SetItemState(row, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
     }
-    if (folders_.empty()) status_->SetLabel("No sync folders yet. Create one with New server folder.");
+    if (folders_.empty()) status_->Info("No sync folders yet. Use New folder to create one on the server.");
+    UpdateFolderButtons();
+}
+
+void MainFrame::UpdateFolderButtons() {
+    const auto id = SelectedFolder();
+    const bool mapped = id && store_.mapping(*id);
+    choose_local_->Enable(id.has_value());
+    choose_local_->SetLabel(mapped ? wxS("Change local folder…") : wxS("Choose local folder…"));
+    stop_->Enable(mapped);
+    choose_local_->GetParent()->Layout();
 }
 
 std::optional<std::string> MainFrame::SelectedFolder() const {
@@ -786,7 +835,7 @@ std::optional<std::string> MainFrame::SelectedFolder() const {
 void MainFrame::OnChooseLocal() {
     const auto id = SelectedFolder();
     if (!id) {
-        status_->SetLabel("Select a folder first.");
+        status_->Info("Select a folder first.");
         return;
     }
     const auto current = store_.mapping(*id);
@@ -795,7 +844,7 @@ void MainFrame::OnChooseLocal() {
     if (dialog.ShowModal() != wxID_OK) return;
     const auto chosen = path_from_utf8(U(dialog.GetPath()));
     try { Desktop(store_).map(*id, chosen); }
-    catch (const std::exception& error) { status_->SetLabel(W(error.what())); return; }
+    catch (const std::exception& error) { status_->Error(W(error.what())); return; }
     shown_mappings_ = store_.mappings();
     WatchFolders();
     Populate();
@@ -804,6 +853,11 @@ void MainFrame::OnChooseLocal() {
 
 void MainFrame::OnStop() {
     if (const auto id = SelectedFolder()) {
+        const auto name = list_->GetItemText(list_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED));
+        if (wxMessageBox("Stop syncing " + name + " on this computer? The local files stay where they are, and the "
+                         "server keeps its copy.", "Stop syncing", wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION,
+                         this) != wxYES)
+            return;
         Desktop(store_).unmap(*id);
         shown_mappings_ = store_.mappings();
         WatchFolders();
@@ -812,18 +866,18 @@ void MainFrame::OnStop() {
 }
 
 void MainFrame::OnNewFolder() {
-    wxTextEntryDialog name(this, "Name for the new server folder", "New server folder");
+    wxTextEntryDialog name(this, "Name for the new folder on the server", "New sync folder");
     if (name.ShowModal() != wxID_OK || name.GetValue().Trim().IsEmpty()) return;
     wxArrayString labels;
     for (const auto& [value, label] : kinds) labels.Add(label);
-    wxSingleChoiceDialog kind(this, "What will it hold?", "New server folder", labels);
+    wxSingleChoiceDialog kind(this, "What will it hold?", "New sync folder", labels);
     if (kind.ShowModal() != wxID_OK) return;
     const std::string folder_name = U(name.GetValue().Trim());
     const std::string folder_kind = kinds[kind.GetSelection()].first;
     auto api = std::make_shared<Api>(store_.api());
     Background([api, folder_name, folder_kind] { api->create_folder(folder_name, folder_kind); },
                [this](std::optional<std::string> error) {
-                   if (error) status_->SetLabel(W(*error));
+                   if (error) status_->Error(W(*error));
                    Refresh();
                });
 }
@@ -854,7 +908,7 @@ void MainFrame::SyncNow() {
         return;
     }
     rerun_ = false;
-    status_->SetLabel(wxS("Syncing…"));
+    status_->Info(wxS("Syncing…"));
     if (tray_) tray_->SetIcon(tree_icon(32), wxS("LOKI Client — syncing"));
     auto outcomes = std::make_shared<std::map<std::string, Outcome>>();
     Background([directory = store_.directory(), outcomes] {
@@ -865,10 +919,12 @@ void MainFrame::SyncNow() {
                    syncing_ = false;
                    int failed = 0;
                    for (const auto& [id, outcome] : *outcomes) failed += outcome.errors.empty() ? 0 : 1;
-                   status_->SetLabel(error ? W(*error)
-                                     : failed ? wxString::Format(wxS("Last sync %s — %d folder(s) need attention"),
-                                                                 wxDateTime::Now().FormatTime(), failed)
-                                              : "Last sync " + wxDateTime::Now().FormatTime());
+                   if (error) status_->Error(W(*error));
+                   else if (failed)
+                       status_->Error(wxString::Format(failed == 1 ? wxS("Synced at %s. 1 folder needs attention.")
+                                                                   : wxS("Synced at %s. %d folders need attention."),
+                                                       wxDateTime::Now().FormatTime(), failed));
+                   else status_->Info("Synced at " + wxDateTime::Now().FormatTime());
                    if (tray_) tray_->SetIcon(tree_icon(32), "LOKI Client");
                    Populate();
                    if (rerun_) CallAfter([this] { SyncNow(); });

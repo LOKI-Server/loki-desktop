@@ -17,7 +17,7 @@ Skald working-copy operations use the published Windows x64 SDK.
 ## Skald repositories
 
 The Windows x64 ZIP bundles the
-[Skald 0.1.0 Windows C SDK runtime](https://github.com/LOKI-Server/skald-vcs/releases/tag/v0.1.0).
+[Skald 0.2.0 Windows C SDK runtime](https://github.com/LOKI-Server/skald-vcs/releases/tag/v0.2.0).
 Xmake downloads the pinned SDK during configuration. Repository operations
 require a Loki server with Skald hosting (0.8.0).
 
@@ -26,17 +26,17 @@ shows the current branch and changes and supports committing, fetching, pulling,
 and pushing. Pull merges upstream changes and reports conflicted paths.
 Transfers use short-lived credentials scoped to the selected repository.
 
-To publish an existing Skald working copy, choose **Publish local repository**
+To publish an existing Skald working copy, choose **Publish local…**
 and select a working copy with a commit. Desktop creates the server repository
 and pushes the current branch.
 
 For an account paired only for Save Sync and shared files, use
-**More → Reconnect to LOKI** to grant repository access.
+**Account → Reconnect to LOKI** to grant repository access.
 
 ## Client updates
 
 On Windows x64, Loki Desktop checks its official GitHub releases at startup and
-every six hours. Use **More → Check for client updates** to check immediately.
+every six hours. Use **Help → Check for client updates** to check immediately.
 If you approve an update, it verifies the release ZIP's SHA-256, waits for
 active sync and repository work, installs in the application folder, and
 restarts. The Windows portable folder must be writable by your account.
@@ -47,10 +47,10 @@ restarts. The Windows portable folder must be writable by your account.
 2. Start LOKI Client, enter your server address, and choose **Pair with a code**.
    Approve the code in the dashboard under **Account → Devices → Pair a device**, or
    sign in with a password.
-3. Open **Sync**, select a server folder, and choose **Choose local folder…**.
+3. Open **Save sync**, select a server folder, and choose **Choose local folder…**.
 
 LOKI Client syncs as soon as anything changes: it holds one request open to the server, which answers the moment another device changes a folder, and watches the mapped folders for local saves (waiting until a file has stopped changing). A 5-minute timer and **Sync now** cover anything else. Closing the
-window keeps it running in the notification area. On Windows, tick **More →
+window keeps it running in the notification area. On Windows, tick **File →
 Start at sign-in** to have it start hidden there each time you sign in (it runs
 with `--background`, which you can also use yourself).
 
@@ -60,7 +60,7 @@ existing settings and saved logins).
 
 ## Browse shared files
 
-Choose **Browse** in the sidebar. Double-click a share or folder to open it,
+Choose **Browse files** in the sidebar. Double-click a share or folder to open it,
 use **Up** to go back, and use **Previous / Next** for larger folders. Select
 a file and choose **Download…**, then pick its destination in the Save As
 dialog. Browse uses the desktop account and works for accounts without Save Sync.

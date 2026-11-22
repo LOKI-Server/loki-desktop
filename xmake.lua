@@ -5,7 +5,7 @@
 --   xmake test            # engine and hashing tests
 
 set_project("loki-sync")
-set_version("0.2.1")
+set_version("0.3.0")
 set_xmakever("2.9.0")
 set_languages("c++20")
 add_rules("mode.debug", "mode.release")
@@ -80,7 +80,7 @@ target("loki-sync")
     on_load(function (target)
         target:add("defines", 'LOKI_CLIENT_VERSION="' .. target:version() .. '"')
     end)
-    add_files("src/app.cpp", "src/main_frame.cpp", "src/files_dialog.cpp", "src/workspace_pages.cpp")
+    add_files("src/app.cpp", "src/main_frame.cpp", "src/files_dialog.cpp", "src/workspace_pages.cpp", "src/ui.cpp")
     add_packages("wxwidgets")
     if is_plat("windows") then
         add_rules("win.sdk.application")
