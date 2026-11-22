@@ -5,6 +5,7 @@
 #include <wx/listctrl.h>
 
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace loki::ui {
@@ -14,8 +15,8 @@ wxColour danger();
 wxColour success();
 wxColour page_background();
 
-/** LOKI's world-tree glyph, drawn rather than shipped as a file. */
-wxBitmap tree_bitmap(int size, const wxColour& background);
+/** LOKI's world-tree glyph, drawn rather than shipped as a file, in LOKI green unless `line` is given. */
+wxBitmap tree_bitmap(int size, const wxColour& background, const wxColour& line = {});
 wxIcon tree_icon(int size);
 
 /** A page title with a muted subtitle beneath it and the page's main actions on the right. */
@@ -53,28 +54,29 @@ private:
 void fill_last_column(wxListCtrl* list);
 
 /**
- * The dark navigation column: LOKI's mark, one row per page, and the signed-in
- * account at the bottom. Clicking the account opens `account_menu`.
+ * The navigation column: LOKI's name, a native list with one row per page, and
+ * the signed-in account, whose Account button calls `on_account`.
  */
 class Sidebar : public wxPanel {
 public:
     Sidebar(wxWindow* parent, std::vector<wxString> pages);
+    ~Sidebar() override;
     void Select(int index);
     void SetAccount(const wxString& name, const wxString& server);
     std::function<void(int)> on_select;
+    // Receives where to open the account menu, in sidebar coordinates.
     std::function<void(wxPoint)> on_account;
 
 private:
-    void Paint();
-    void Arrange();
-    int HitTest(wxPoint point) const;
+    void Select(int index, bool force);
 
-    std::vector<wxString> pages_;
-    std::vector<wxRect> rows_;
-    wxRect account_;
-    wxString name_, server_;
-    int selected_ = 0;
-    int hover_ = -1;  // A page row, or -2 for the account.
+    wxListView* nav_;
+    std::unique_ptr<wxImageList> images_;
+    wxStaticText *name_, *server_;
+    wxString server_text_;
+    int selected_ = -1;
+    // Set while the sidebar changes the selection itself, so it does not report it.
+    bool quiet_ = false;
 };
 
 }  // namespace loki::ui

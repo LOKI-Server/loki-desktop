@@ -1,7 +1,8 @@
 #include "ui.hpp"
 
-#include <wx/dcbuffer.h>
-#include <wx/graphics.h>
+#include <wx/bmpbndl.h>
+#include <wx/imaglist.h>
+#include <wx/statline.h>
 
 #include <algorithm>
 #include <memory>
@@ -9,13 +10,28 @@
 namespace loki::ui {
 namespace {
 
-// The sidebar shares the dark green of LOKI's dashboard and icon.
-const wxColour kSidebar(14, 22, 18);
-const wxColour kSidebarText(206, 220, 211);
-const wxColour kSidebarMuted(128, 150, 137);
-const wxColour kSidebarHover(24, 38, 31);
-const wxColour kSidebarSelected(30, 54, 41);
 const wxColour kAccent(125, 231, 167);
+const wxColour kLogoGreen(28, 122, 72);
+
+// Sidebar icons from LOKI's web dashboard (static/lib/icons.js), stroked on a 24px grid.
+const char* const kSyncIcon = "M4 10a8 8 0 0 1 14.5-4.5L20 7M20 3v4h-4M20 14a8 8 0 0 1-14.5 4.5L4 17M4 21v-4h4M9 12l2 2 4-4";
+const char* const kFolderIcon = "M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z";
+const char* const kAppsIcon = "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z";
+const char* const kRepoIcon = "M5 4a2 2 0 0 1 2-2h12v16H7a2 2 0 0 0-2 2zM5 20a2 2 0 0 0 2 2h12v-4M9 6h6";
+
+/** A dashboard icon drawn in `colour`, `size` pixels square, inside a `width` by `height` transparent cell. */
+wxBitmap stroke_icon(const char* path, const wxColour& colour, int size, int width, int height) {
+    const auto svg = wxString::Format(
+        R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="%s" stroke-width="1.75" )"
+        R"(stroke-linecap="round" stroke-linejoin="round"><path d="%s"/></svg>)",
+        colour.GetAsString(wxC2S_HTML_SYNTAX), path);
+    const auto icon = wxBitmapBundle::FromSVG(svg.utf8_str(), wxSize(size, size)).GetBitmap(wxSize(size, size));
+    wxImage cell(width, height);
+    cell.SetAlpha();
+    std::fill_n(cell.GetAlpha(), width * height, 0);
+    cell.Paste(icon.ConvertToImage(), (width - size) / 2, (height - size) / 2, wxIMAGE_ALPHA_BLEND_COMPOSE);
+    return wxBitmap(cell);
+}
 
 }  // namespace
 
@@ -24,14 +40,14 @@ wxColour danger() { return {185, 48, 42}; }
 wxColour success() { return {28, 122, 72}; }
 wxColour page_background() { return wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW); }
 
-wxBitmap tree_bitmap(int size, const wxColour& background) {
+wxBitmap tree_bitmap(int size, const wxColour& background, const wxColour& line) {
     wxBitmap bitmap(size, size, 24);
     {
         wxMemoryDC dc(bitmap);
         dc.SetBackground(wxBrush(background));
         dc.Clear();
         const double s = size / 32.0;
-        dc.SetPen(wxPen(kAccent, std::max(2, int(3 * s)), wxPENSTYLE_SOLID));
+        dc.SetPen(wxPen(line.IsOk() ? line : kAccent, std::max(2, int(3 * s)), wxPENSTYLE_SOLID));
         auto line = [&](double x1, double y1, double x2, double y2) {
             dc.DrawLine(int(x1 * s), int(y1 * s), int(x2 * s), int(y2 * s));
         };
@@ -133,125 +149,102 @@ void fill_last_column(wxListCtrl* list) {
     });
 }
 
-Sidebar::Sidebar(wxWindow* parent, std::vector<wxString> pages) : wxPanel(parent), pages_(std::move(pages)) {
-    SetBackgroundStyle(wxBG_STYLE_PAINT);
-    SetMinSize(wxSize(FromDIP(208), -1));
-    SetName("Navigation");
-    Bind(wxEVT_PAINT, [this](wxPaintEvent&) { Paint(); });
-    Bind(wxEVT_SIZE, [this](wxSizeEvent& e) { Arrange(); Refresh(); e.Skip(); });
-    Bind(wxEVT_MOTION, [this](wxMouseEvent& e) {
-        const int hit = HitTest(e.GetPosition());
-        SetCursor(hit == -1 ? wxNullCursor : wxCursor(wxCURSOR_HAND));
-        if (hit != hover_) { hover_ = hit; Refresh(); }
+Sidebar::Sidebar(wxWindow* parent, std::vector<wxString> pages) : wxPanel(parent) {
+    const auto background = wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE);
+    SetBackgroundColour(background);
+    auto* row = new wxBoxSizer(wxHORIZONTAL);
+    auto* column = new wxBoxSizer(wxVERTICAL);
+
+    auto* brand = new wxBoxSizer(wxHORIZONTAL);
+    brand->Add(new wxStaticBitmap(this, wxID_ANY, tree_bitmap(FromDIP(24), background, kLogoGreen)), 0,
+               wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(8));
+    auto* name = new wxStaticText(this, wxID_ANY, "LOKI");
+    name->SetFont(name->GetFont().Scaled(1.3f).Bold());
+    brand->Add(name, 0, wxALIGN_CENTER_VERTICAL);
+    column->Add(brand, 0, wxLEFT | wxTOP | wxBOTTOM, FromDIP(16));
+
+    // A plain Windows list in Explorer's style, one row per page with the dashboard's icon for it.
+    nav_ = new wxListView(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                          wxLC_LIST | wxLC_SINGLE_SEL | wxBORDER_NONE);
+    nav_->EnableSystemTheme();
+    nav_->SetBackgroundColour(background);
+    nav_->SetFont(nav_->GetFont().Scaled(1.05f));
+    // Grey like the dashboard's sidebar, and green for the open page.
+    const char* const icons[] = {kSyncIcon, kFolderIcon, kAppsIcon, kRepoIcon};
+    const int size = FromDIP(18), width = FromDIP(30), height = FromDIP(36);
+    images_ = std::make_unique<wxImageList>(width, height, false);
+    for (const auto& colour : {wxColour(95, 122, 105), kLogoGreen})
+        for (const auto* icon : icons) images_->Add(stroke_icon(icon, colour, size, width, height));
+    nav_->SetImageList(images_.get(), wxIMAGE_LIST_SMALL);
+    for (size_t i = 0; i < pages.size(); ++i) nav_->InsertItem(long(i), pages[i], int(i % std::size(icons)));
+    // List view lays items out in columns; one column as wide as the list keeps them in a single stack.
+    nav_->Bind(wxEVT_SIZE, [this](wxSizeEvent& e) {
+        e.Skip();
+        nav_->CallAfter([this] { nav_->SetColumnWidth(0, nav_->GetClientSize().GetWidth() - FromDIP(4)); });
     });
-    Bind(wxEVT_LEAVE_WINDOW, [this](wxMouseEvent&) { if (hover_ != -1) { hover_ = -1; Refresh(); } });
-    Bind(wxEVT_LEFT_UP, [this](wxMouseEvent& e) {
-        const int hit = HitTest(e.GetPosition());
-        if (hit == -2 && on_account) on_account(wxPoint(account_.GetLeft(), account_.GetTop()));
-        else if (hit >= 0 && on_select) on_select(hit);
+    nav_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent& e) {
+        if (quiet_ || e.GetIndex() == selected_) return;
+        Select(int(e.GetIndex()), true);
+        if (on_select) on_select(selected_);
     });
-    Arrange();
+    // Clicking empty space would leave no page selected; keep the current one.
+    nav_->Bind(wxEVT_LIST_ITEM_DESELECTED, [this](wxListEvent&) {
+        if (!quiet_) CallAfter([this] { Select(selected_, true); });
+    });
+    column->Add(nav_, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(8));
+
+    // The signed-in account, with its commands behind a button.
+    column->Add(new wxStaticLine(this), 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(12));
+    name_ = new wxStaticText(this, wxID_ANY, "");
+    name_->SetFont(name_->GetFont().Bold());
+    column->Add(name_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(12));
+    // Sized by the sidebar rather than its text; long addresses are shortened in the middle to fit.
+    server_ = new wxStaticText(this, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxST_NO_AUTORESIZE);
+    server_->SetForegroundColour(muted());
+    server_->SetMinSize(wxSize(FromDIP(40), server_->GetCharHeight()));
+    column->AddSpacer(FromDIP(2));
+    column->Add(server_, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(12));
+    server_->Bind(wxEVT_SIZE, [this](wxSizeEvent& e) {
+        e.Skip();
+        const auto fitted = wxControl::Ellipsize(server_text_, wxClientDC(server_), wxELLIPSIZE_MIDDLE, e.GetSize().GetWidth());
+        if (fitted != server_->GetLabel()) server_->SetLabel(fitted);
+    });
+    auto* account = new wxButton(this, wxID_ANY, wxS("Account ▾"));
+    account->Bind(wxEVT_BUTTON, [this, account](wxCommandEvent&) {
+        if (on_account) on_account(account->GetPosition() + wxPoint(0, account->GetSize().GetHeight()));
+    });
+    column->Add(account, 0, wxALL, FromDIP(12));
+
+    row->Add(column, 1, wxEXPAND);
+    row->Add(new wxStaticLine(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_VERTICAL), 0, wxEXPAND);
+    SetSizer(row);
+    SetMinSize(wxSize(FromDIP(200), -1));
+    Select(0, true);
 }
 
-void Sidebar::Select(int index) {
-    if (index == selected_) return;
+Sidebar::~Sidebar() = default;
+
+void Sidebar::Select(int index) { Select(index, false); }
+
+void Sidebar::Select(int index, bool force) {
+    if (index < 0 || index >= nav_->GetItemCount() || (index == selected_ && !force)) return;
+    // Only the open page's icon is green.
+    if (selected_ >= 0) nav_->SetItemImage(selected_, selected_ % 4);
+    nav_->SetItemImage(index, index % 4 + 4);
     selected_ = index;
-    Refresh();
+    quiet_ = true;
+    nav_->Select(index);
+    nav_->Focus(index);
+    quiet_ = false;
 }
 
 void Sidebar::SetAccount(const wxString& name, const wxString& server) {
-    name_ = name;
-    server_ = server;
-    Refresh();
-}
-
-void Sidebar::Arrange() {
-    const auto size = GetClientSize();
-    const int inset = FromDIP(10), height = FromDIP(36), gap = FromDIP(2);
-    rows_.clear();
-    int y = FromDIP(74);
-    for (size_t i = 0; i < pages_.size(); ++i) {
-        rows_.emplace_back(inset, y, size.GetWidth() - 2 * inset, height);
-        y += height + gap;
-    }
-    const int account_height = FromDIP(54);
-    account_ = wxRect(inset, size.GetHeight() - account_height - inset, size.GetWidth() - 2 * inset, account_height);
-}
-
-int Sidebar::HitTest(wxPoint point) const {
-    for (size_t i = 0; i < rows_.size(); ++i)
-        if (rows_[i].Contains(point)) return int(i);
-    if (!name_.empty() && account_.Contains(point)) return -2;
-    return -1;
-}
-
-void Sidebar::Paint() {
-    wxAutoBufferedPaintDC dc(this);
-    dc.SetBackground(wxBrush(kSidebar));
-    dc.Clear();
-    std::unique_ptr<wxGraphicsContext> gc(wxGraphicsContext::Create(dc));
-    if (!gc) return;
-    const double radius = FromDIP(6);
-    const auto base = GetFont();
-
-    // LOKI's mark and name.
-    const int mark = FromDIP(26);
-    gc->DrawBitmap(tree_bitmap(mark, kSidebar), FromDIP(18), FromDIP(22), mark, mark);
-    gc->SetFont(base.Scaled(1.35f).Bold(), *wxWHITE);
-    double w, h;
-    gc->GetTextExtent("LOKI", &w, &h);
-    gc->DrawText("LOKI", FromDIP(52), FromDIP(22) + (mark - h) / 2);
-
-    for (size_t i = 0; i < rows_.size(); ++i) {
-        const auto& r = rows_[i];
-        const bool selected = int(i) == selected_;
-        if (selected || int(i) == hover_) {
-            gc->SetBrush(wxBrush(selected ? kSidebarSelected : kSidebarHover));
-            gc->SetPen(*wxTRANSPARENT_PEN);
-            gc->DrawRoundedRectangle(r.x, r.y, r.width, r.height, radius);
-        }
-        if (selected) {
-            gc->SetBrush(wxBrush(kAccent));
-            gc->DrawRoundedRectangle(r.x, r.y + FromDIP(9), FromDIP(3), r.height - FromDIP(18), FromDIP(2));
-        }
-        gc->SetFont(selected ? base.Bold() : base, selected ? kAccent : kSidebarText);
-        gc->GetTextExtent(pages_[i], &w, &h);
-        gc->DrawText(pages_[i], r.x + FromDIP(14), r.y + (r.height - h) / 2);
-    }
-
-    if (name_.empty()) return;
-    // The signed-in account: an initial in a circle, the name, and the server.
-    const auto& a = account_;
-    if (hover_ == -2) {
-        gc->SetBrush(wxBrush(kSidebarHover));
-        gc->SetPen(*wxTRANSPARENT_PEN);
-        gc->DrawRoundedRectangle(a.x, a.y, a.width, a.height, radius);
-    }
-    const int circle = FromDIP(32);
-    const double cx = a.x + FromDIP(10), cy = a.y + (a.height - circle) / 2.0;
-    gc->SetBrush(wxBrush(kSidebarSelected));
-    gc->SetPen(*wxTRANSPARENT_PEN);
-    gc->DrawEllipse(cx, cy, circle, circle);
-    const wxString initial = name_.Left(1).Upper();
-    gc->SetFont(base.Bold(), kAccent);
-    gc->GetTextExtent(initial, &w, &h);
-    gc->DrawText(initial, cx + (circle - w) / 2, cy + (circle - h) / 2);
-
-    const int text_x = int(cx) + circle + FromDIP(10);
-    const int text_width = a.GetRight() - text_x - FromDIP(22);
-    wxClientDC measure(this);
-    measure.SetFont(base.Bold());
-    gc->SetFont(base.Bold(), kSidebarText);
-    gc->DrawText(wxControl::Ellipsize(name_, measure, wxELLIPSIZE_END, text_width), text_x, a.y + FromDIP(9));
-    const auto caption = base.Scaled(0.9f);
-    measure.SetFont(caption);
-    gc->SetFont(caption, kSidebarMuted);
-    gc->DrawText(wxControl::Ellipsize(server_, measure, wxELLIPSIZE_MIDDLE, text_width), text_x, a.y + FromDIP(28));
-    // A chevron hints that the account opens a menu.
-    gc->SetPen(wxPen(kSidebarMuted, FromDIP(2)));
-    const double vx = a.GetRight() - FromDIP(16), vy = a.y + a.height / 2.0;
-    gc->StrokeLine(vx - FromDIP(4), vy - FromDIP(2), vx, vy + FromDIP(2));
-    gc->StrokeLine(vx, vy + FromDIP(2), vx + FromDIP(4), vy - FromDIP(2));
+    name_->SetLabel(name);
+    server_text_ = server;
+    server_->SetLabel(wxControl::Ellipsize(server, wxClientDC(server_), wxELLIPSIZE_MIDDLE,
+                                           std::max(FromDIP(40), server_->GetSize().GetWidth())));
+    server_->SetToolTip(server);
+    Layout();
 }
 
 }  // namespace loki::ui

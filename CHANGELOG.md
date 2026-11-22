@@ -2,9 +2,9 @@
 
 ## 0.3.0
 
-- Refresh the window: a dark LOKI sidebar with the signed-in account at the bottom, page headers with each page's main actions, and buttons that only appear when they apply.
+- Refresh the window: a native sidebar with the LOKI dashboard's page icons and the signed-in account at the bottom, page headers with each page's main actions, and buttons that only appear when they apply.
 - Replace the single **More** menu with **File**, **View**, **Account**, and **Help**. **View** switches pages with Ctrl+1 to Ctrl+4, and **Help → About LOKI Client** shows the version.
-- Click the account in the sidebar to open LOKI in your browser, reconnect, or sign out.
+- The sidebar's **Account** button opens LOKI in your browser, reconnects, or signs out.
 - Center the connect screen, and sign in by pressing Enter in the password or code field.
 - Show errors in red and completed downloads in green, wrapped to the window width.
 - Open Save sync first when the account can sync.
