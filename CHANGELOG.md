@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0
+
+- Organize repository controls into **Sync**, **Branches**, and **Working changes**.
+- Manage local branches, check out fetched branches, and see whether the current branch is up to date, ahead, behind, or diverged. Publish new branches from the desktop client.
+- Browse commit history, preview staged and unstaged changes, and select which files to commit.
+- Compare and merge branches, with conflict status and an option to abort a pending merge.
+
 ## 0.3.0
 
 - Refresh the window: a native sidebar with the LOKI dashboard's page icons and the signed-in account at the bottom, page headers with each page's main actions, and buttons that only appear when they apply.

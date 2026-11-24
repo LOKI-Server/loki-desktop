@@ -26,6 +26,25 @@ shows the current branch and changes and supports committing, fetching, pulling,
 and pushing. Pull merges upstream changes and reports conflicted paths.
 Transfers use short-lived credentials scoped to the selected repository.
 
+Use the **Branches** picker to select and switch local branches. The **Branch
+actions** menu lets you create, compare, and delete branches. **New branch…**
+starts at the current revision. Switch to the
+new branch, commit your changes, and choose **Publish branch** with repository
+write access. The sync status compares the current branch with the branch of
+the same name at the last sync. Use **Fetch** to refresh it, then open
+**Branch actions → Remote branches…** to check out a fetched branch.
+
+Under **Working changes**, use **Diff…** to review staged and unstaged changes.
+**Stage…** lets you choose individual files, and **Commit staged…** commits the
+staged changes. Use **More** to unstage files or commit the entire working copy.
+
+**History…** shows the 100 most recent reachable commits and the files each
+commit changed. **Compare branches…** compares the current revision with a
+local or fetched branch and lets you merge that revision into the current
+branch. If Skald reports conflicts, resolve the listed files, stage each
+resolution, then choose **Commit staged…**. **More → Abort merge…** is available
+while a merge is pending.
+
 To publish an existing Skald working copy, choose **Publish local…**
 and select a working copy with a commit. Desktop creates the server repository
 and pushes the current branch.

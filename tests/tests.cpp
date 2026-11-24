@@ -1,5 +1,6 @@
 // Engine and hashing tests. The two-device test runs against a real LOKI server
 // when LOKI_TEST_SERVER, LOKI_TEST_USER, and LOKI_TEST_PASSWORD are set.
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <future>
@@ -342,15 +343,153 @@ static void skald_working_copy() {
 
     const auto nested = folder / "assets";
     write(nested / "level.txt", "map data");
-    CHECK(repository_status(nested).find("assets/level.txt") != std::string::npos);
+    CHECK(repository_status(nested).changes.find("assets/level.txt") != std::string::npos);
     commit_repository_changes(nested, "Add level", "Desktop Tester");
-    CHECK(repository_status(nested).find("Working copy is clean.") != std::string::npos);
+    auto status = repository_status(nested);
+    CHECK(status.changes.find("Working copy is clean.") != std::string::npos);
+    CHECK(status.current_branch.has_value());
+    const auto original = status.current_branch.value();
+
+    create_repository_branch(nested, "feature/level");
+    status = repository_status(nested);
+    CHECK(status.branches.size() == 2);
+    CHECK(status.current_branch == original);
+    switch_repository_branch(nested, "feature/level");
+    CHECK(repository_status(nested).current_branch == "feature/level");
+    create_repository_branch(nested, "temporary");
+    delete_repository_branch(nested, "temporary");
+    CHECK(repository_status(nested).branches.size() == 2);
+
+    write(nested / "level.txt", "new map data");
+    commit_repository_changes(nested, "Update level", "Desktop Tester");
+    write(nested / "level.txt", "uncommitted map data");
+    try { switch_repository_branch(nested, original); CHECK(false); }
+    catch (const std::runtime_error&) {}
+    CHECK(repository_status(nested).current_branch == "feature/level");
+    CHECK(read(nested / "level.txt") == "uncommitted map data");
+    write(nested / "level.txt", "new map data");
+    switch_repository_branch(nested, original);
+    CHECK(read(nested / "level.txt") == "map data");
+    try { delete_repository_branch(nested, "feature/level"); CHECK(false); }
+    catch (const std::runtime_error&) {}
+    CHECK(repository_status(nested).branches.size() == 2);
 
     Store store(directory / "profile");
     const auto* id = "01234567-89ab-cdef-0123-456789abcdef";
     link_repository_folder(store, id, nested);
     CHECK(fs::equivalent(repository_folder(store, id), folder));
     fs::remove_all(directory);
+}
+
+static void skald_repository_workflows() {
+    const auto folder = scratch("skald-workflows");
+    constexpr auto remote_url = "https://loki.example/skald/v1/repos/project";
+    SkaldRepo* repo = nullptr;
+    if (skald_init(path_utf8(folder).c_str(), &repo) != SKALD_OK) throw std::runtime_error(skald_last_error());
+    const auto remote_result = skald_remote(repo, "origin", remote_url);
+    skald_repo_free(repo);
+    CHECK(remote_result == SKALD_OK);
+    CHECK(repository_status(folder, remote_url).sync == BranchSync::Unknown);
+
+    write(folder / "notes/level.txt", "original level\n");
+    write(folder / "title.txt", "original title\n");
+    commit_repository_changes(folder, "Start project", "Desktop Tester");
+    const auto initial = repository_status(folder);
+    const auto initial_history = repository_history(folder);
+    CHECK(initial_history.size() == 1);
+    CHECK(initial_history.front().id == initial.revision);
+    const auto initial_diff = repository_commit_diff(folder, initial_history.front());
+    CHECK(initial_diff.size() == 2);
+    CHECK(initial_diff.front().path == "notes/level.txt");
+    CHECK(initial_diff.front().change == "added");
+    const auto unborn_comparison = compare_repository_branch(folder, std::nullopt, initial.revision.value());
+    CHECK(unborn_comparison.files.size() == 2 && unborn_comparison.incoming.size() == 1);
+
+    create_repository_branch(folder, "artwork");
+    switch_repository_branch(folder, "artwork");
+    write(folder / "notes/level.txt", "remote level\n");
+    write(folder / "title.txt", "unfinished title\n");
+    stage_repository_paths(folder, {"title.txt"}, true);
+    stage_repository_paths(folder, {"title.txt"}, false);
+    stage_repository_paths(folder, {"notes/level.txt"}, true);
+    const auto staged = repository_working_diff(folder, true);
+    const auto unstaged = repository_working_diff(folder, false);
+    CHECK(staged.size() == 1 && staged.front().path == "notes/level.txt");
+    CHECK(staged.front().patch.value_or("").find("+remote level") != std::string::npos);
+    CHECK(unstaged.size() == 1 && unstaged.front().path == "title.txt");
+    commit_staged_repository_changes(folder, "Update level art", "Desktop Tester");
+    const auto feature = repository_status(folder);
+    CHECK(feature.staged.empty() && feature.unstaged == std::vector<std::string>{"title.txt"});
+    const auto feature_files = repository_commit_diff(folder, repository_history(folder).front());
+    CHECK(feature_files.size() == 1 && feature_files.front().path == "notes/level.txt");
+
+    // Populate the persisted refs in the same format as an SDK fetch.
+    const auto state_file = folder / ".skald" / "state.json";
+    auto state = nlohmann::json::parse(read(state_file));
+    state["fetched"]["origin"] = {
+        {"branches/" + initial.current_branch.value(), feature.revision.value()},
+        {"branches/team/new-level", feature.revision.value()},
+        {"tags/v1", initial.revision.value()}
+    };
+    write(state_file, state.dump());
+    CHECK(repository_status(folder, remote_url).sync == BranchSync::LocalOnly);
+    switch_repository_branch(folder, initial.current_branch.value());
+    const auto behind = repository_status(folder, remote_url);
+    CHECK(behind.sync == BranchSync::Behind);
+    CHECK(behind.remote_branches.size() == 2);
+    CHECK(behind.remote_branches.back().name == "team/new-level");
+    create_repository_branch(folder, "team/new-level", behind.remote_branches.back().revision.value());
+    switch_repository_branch(folder, "team/new-level");
+    CHECK(repository_status(folder, remote_url).sync == BranchSync::UpToDate);
+    write(folder / "branch-note.txt", "additional update\n");
+    stage_repository_paths(folder, {"branch-note.txt"}, true);
+    commit_staged_repository_changes(folder, "Add branch note", "Desktop Tester");
+    CHECK(repository_status(folder, remote_url).sync == BranchSync::Ahead);
+
+    switch_repository_branch(folder, initial.current_branch.value());
+    write(folder / "notes/level.txt", "local level\n");
+    stage_repository_paths(folder, {"notes/level.txt"}, true);
+    commit_staged_repository_changes(folder, "Change level locally", "Desktop Tester");
+    const auto diverged = repository_status(folder, remote_url);
+    CHECK(diverged.sync == BranchSync::Diverged);
+    const auto target = feature.revision.value();
+    const auto comparison = compare_repository_branch(folder, diverged.revision, target);
+    CHECK(comparison.current_only.size() == 1 && comparison.current_only.front().message == "Change level locally");
+    CHECK(comparison.incoming.size() == 1 && comparison.incoming.front().message == "Update level art");
+    CHECK(comparison.files.size() == 1 && comparison.files.front().path == "notes/level.txt");
+
+    const auto merge = [&] {
+        return merge_repository_branch(folder, diverged.current_branch, diverged.revision, target, "Desktop Tester", "Merge artwork");
+    };
+    CHECK(merge() == std::vector<std::string>{"notes/level.txt"});
+    auto pending = repository_status(folder);
+    CHECK(pending.merging && pending.conflicts == std::vector<std::string>{"notes/level.txt"});
+    abort_repository_merge(folder);
+    CHECK(!repository_status(folder).merging);
+    CHECK(merge() == std::vector<std::string>{"notes/level.txt"});
+    write(folder / "notes/level.txt", "resolved level\n");
+    stage_repository_paths(folder, {"notes/level.txt"}, true);
+    pending = repository_status(folder);
+    CHECK(pending.merging && pending.conflicts.empty());
+    commit_staged_repository_changes(folder, "Resolve merge", "Desktop Tester");
+    CHECK(repository_history(folder).front().parents.size() == 2);
+    CHECK(repository_status(folder).unstaged == std::vector<std::string>{"title.txt"});
+
+    const auto resolved = repository_status(folder);
+    const auto remote_checkout = std::ranges::find(resolved.branches, "team/new-level", &RepositoryBranch::name);
+    if (remote_checkout == resolved.branches.end()) throw std::runtime_error("The fetched branch was not checked out.");
+    CHECK(merge_repository_branch(folder, resolved.current_branch, resolved.revision,
+                                  remote_checkout->revision.value(), "Desktop Tester", "Merge branch note").empty());
+    CHECK(repository_history(folder).front().message == "Merge branch note");
+    CHECK(read(folder / "branch-note.txt") == "additional update\n");
+    CHECK(read(folder / "notes/level.txt") == "resolved level\n");
+
+    create_repository_branch(folder, "fast-forward", initial.revision.value());
+    switch_repository_branch(folder, "fast-forward");
+    CHECK(merge_repository_branch(folder, "fast-forward", initial.revision, target,
+                                  "Desktop Tester", "Fast-forward artwork").empty());
+    CHECK(repository_status(folder).revision == feature.revision);
+    fs::remove_all(folder);
 }
 #endif
 
@@ -406,6 +545,7 @@ int main() try {
     repository_listings();
 #ifdef LOKI_HAS_SKALD
     skald_working_copy();
+    skald_repository_workflows();
 #endif
     hashing();
     indexes();

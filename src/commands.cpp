@@ -1,10 +1,13 @@
 #include "commands.hpp"
 #include "sha256.hpp"
 
+#include <algorithm>
+#include <fstream>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <string_view>
+#include <unordered_set>
 #include "management_api.hpp"
 #ifdef LOKI_HAS_SKALD
 #include <skald_vcs.h>
@@ -98,10 +101,97 @@ std::string current_branch(const SkaldHandle& workspace) {
     return info.at("branch");
 }
 
-void require_local_branch(const SkaldHandle& workspace, const std::string& branch) {
+json local_branches(const SkaldHandle& workspace) {
     SkaldOutput output;
     check_skald(skald_branches(workspace.get(), output.out()));
-    const auto branches = output.parsed();
+    return output.parsed();
+}
+
+std::vector<RepositoryCommit> history(const SkaldHandle& workspace, const char* revision, uint32_t limit) {
+    SkaldOutput output;
+    check_skald(skald_history(workspace.get(), revision, limit, output.out()));
+    std::vector<RepositoryCommit> result;
+    for (const auto& entry : output.parsed()) {
+        const auto& data = entry.at(1);
+        result.push_back({entry.at(0), data.at("root"), data.at("author"), data.at("message"),
+                          data.at("timestamp"), data.at("parents")});
+    }
+    return result;
+}
+
+constexpr uint32_t comparison_history_limit = 1001;
+
+BranchSync branch_sync(const SkaldHandle& workspace, const std::string& local, const std::string& remote) {
+    if (local == remote) return BranchSync::UpToDate;
+    const auto local_history = history(workspace, local.c_str(), comparison_history_limit);
+    if (std::ranges::find(local_history, remote, &RepositoryCommit::id) != local_history.end())
+        return BranchSync::Ahead;
+    const auto remote_history = history(workspace, remote.c_str(), comparison_history_limit);
+    if (std::ranges::find(remote_history, local, &RepositoryCommit::id) != remote_history.end())
+        return BranchSync::Behind;
+    return local_history.size() < comparison_history_limit && remote_history.size() < comparison_history_limit
+        ? BranchSync::Diverged : BranchSync::Unknown;
+}
+
+std::vector<RepositoryDiff> differences(const SkaldHandle& workspace, const char* from, const char* to, bool staged) {
+    SkaldOutput output;
+    check_skald(skald_diff(workspace.get(), from, to, staged, output.out()));
+    std::vector<RepositoryDiff> result;
+    for (const auto& entry : output.parsed()) {
+        RepositoryDiff difference{entry.at("path"), entry.at("change"), std::nullopt};
+        if (!entry.at("text").is_null()) difference.patch = entry.at("text").get<std::string>();
+        result.push_back(std::move(difference));
+    }
+    return result;
+}
+
+// Skald's diff API accepts revisions but has no empty-tree operand. For a root
+// commit, list the files directly from the SDK's documented v1 tree objects.
+void initial_files(const fs::path& root, const std::string& tree, const std::string& prefix,
+                   unsigned depth, size_t& remaining, std::vector<RepositoryDiff>& result) {
+    if (depth > 64 || tree.size() != 65 || tree.front() != 't' ||
+        tree.find_first_not_of("0123456789abcdef", 1) != std::string::npos)
+        throw std::runtime_error("Invalid Skald tree.");
+    const auto path = root / ".skald" / "objects" / tree.substr(0, 3) / tree.substr(3);
+    const auto length = fs::file_size(path);
+    if (length < 2 || length > 8 * 1024 * 1024 + 1) throw std::runtime_error("Invalid Skald tree size.");
+    std::ifstream file(path, std::ios::binary);
+    if (file.get() != 0) throw std::runtime_error("Unsupported Skald tree codec.");
+    std::string payload(size_t(length) - 1, '\0');
+    if (!file.read(payload.data(), std::streamsize(payload.size()))) throw std::runtime_error("Cannot read Skald tree.");
+    const auto entries = json::parse(payload);
+    for (const auto& [name, entry] : entries.items()) {
+        if (remaining == 0 || prefix.size() + name.size() > 1024) throw std::runtime_error("Skald tree exceeds format limits.");
+        --remaining;
+        const auto id = entry.at("id").get<std::string>();
+        if (id.starts_with('t')) initial_files(root, id, prefix + name + "/", depth + 1, remaining, result);
+        else if (id.starts_with('f')) result.push_back({prefix + name, "added", std::nullopt});
+        else throw std::runtime_error("Invalid Skald tree entry.");
+    }
+}
+
+std::vector<RepositoryDiff> initial_diff(const fs::path& root, const std::string& tree) {
+    std::vector<RepositoryDiff> result;
+    size_t remaining = 250000;
+    initial_files(root, tree, "", 0, remaining, result);
+    return result;
+}
+
+void commit_staged(const SkaldHandle& workspace, const std::string& summary, const std::string& author) {
+    SkaldOutput result;
+    check_skald(skald_commit(workspace.get(), author.c_str(), summary.c_str(), result.out()));
+}
+
+std::vector<std::string> merge_conflicts(int32_t code, const SkaldOutput& result) {
+    if (code != SKALD_CONFLICT) {
+        check_skald(code);
+        return {};
+    }
+    return result.parsed().at("conflicts").get<std::vector<std::string>>();
+}
+
+void require_local_branch(const SkaldHandle& workspace, const std::string& branch) {
+    const auto branches = local_branches(workspace);
     if (!branches.contains(branch) || branches.at(branch).is_null())
         throw std::runtime_error("The local Skald branch " + branch + " needs a commit before it can be pushed.");
 }
@@ -232,8 +322,8 @@ void clone_hosted_repository(Store& store, const std::string& id, const fs::path
 #endif
 }
 
-void transfer_repository(Store& store, const std::string& id, const fs::path& folder,
-                         RepositoryTransfer transfer) {
+std::vector<std::string> transfer_repository(Store& store, const std::string& id, const fs::path& folder,
+                                             RepositoryTransfer transfer) {
 #ifdef LOKI_HAS_SKALD
     const auto account = store.account();
     ManagementApi api(account.server, account.session.token);
@@ -253,14 +343,9 @@ void transfer_repository(Store& store, const std::string& id, const fs::path& fo
         const auto author = repository_author(api);
         SkaldOutput result;
         const auto code = skald_pull(workspace.get(), remote.c_str(), token.c_str(), nullptr, author.c_str(), result.out());
-        if (code == SKALD_CONFLICT) {
-            std::string message = "Resolve the Skald merge conflicts, then commit the changes:";
-            const auto merge = result.parsed();
-            for (const auto& file : merge.at("conflicts")) message += "\n" + file.get<std::string>();
-            throw std::runtime_error(message);
-        }
-        check_skald(code);
+        return merge_conflicts(code, result);
     }
+    return {};
 #else
     skald_unavailable();
 #endif
@@ -281,20 +366,93 @@ void link_repository_folder(Store& store, const std::string& id, const fs::path&
 #endif
 }
 
-std::string repository_status(const fs::path& folder) {
+RepositoryStatus repository_status(const fs::path& folder, const std::string& remote_url) {
 #ifdef LOKI_HAS_SKALD
-    const auto info = status(open_workspace(folder));
+    const auto root = workspace_root(folder);
+    const auto workspace = open_workspace(root);
+    const auto info = status(workspace);
+    const auto branches = local_branches(workspace);
+    // The SDK exposes fetch results but has no reader for saved remote-tracking refs
+    // or the pending merge. The v1 state file is atomically replaced by Skald.
+    const auto state = json::parse(read_text(root / ".skald" / "state.json"));
+    RepositoryStatus result;
+    result.merging = !state.at("merge_parent").is_null();
+    if (!info.at("revision").is_null()) result.revision = info.at("revision").get<std::string>();
+    for (const auto& [name, revision] : branches.items()) {
+        RepositoryBranch branch{name, std::nullopt};
+        if (!revision.is_null()) branch.revision = revision.get<std::string>();
+        result.branches.push_back(std::move(branch));
+    }
+
     std::ostringstream output;
-    if (info.at("branch").is_null()) output << "Detached at " << info.at("revision").get<std::string>() << '\n';
-    else output << "Branch " << info.at("branch").get<std::string>() << '\n';
-    for (const auto& [path, change] : info.at("staged").items())
+    if (!info.at("branch").is_null()) result.current_branch = info.at("branch").get<std::string>();
+    for (const auto& [path, change] : info.at("staged").items()) {
+        result.staged.push_back(path);
         output << "staged   " << change.get<std::string>() << "  " << path << '\n';
-    for (const auto& [path, change] : info.at("unstaged").items())
+    }
+    for (const auto& [path, change] : info.at("unstaged").items()) {
+        result.unstaged.push_back(path);
         output << "working  " << change.get<std::string>() << "  " << path << '\n';
-    for (const auto& path : info.at("conflicts")) output << "conflict " << path.get<std::string>() << '\n';
-    if (info.at("staged").empty() && info.at("unstaged").empty() && info.at("conflicts").empty())
+    }
+    result.conflicts = info.at("conflicts").get<std::vector<std::string>>();
+    if (result.merging) output << "Merge in progress. Stage each resolution and commit the merge.\n";
+    for (const auto& path : result.conflicts) output << "conflict " << path << '\n';
+    if (!result.merging && result.staged.empty() && result.unstaged.empty() && result.conflicts.empty())
         output << "Working copy is clean.\n";
-    return output.str();
+    result.changes = output.str();
+
+    if (remote_url.empty()) return result;
+    const auto& configured = state.at("remotes");
+    const auto& fetched = state.at("fetched");
+    std::string remote;
+    if (configured.value("origin", std::string()) == remote_url) remote = "origin";
+    else for (const auto& [name, url] : configured.items()) {
+        if (url == remote_url) { remote = name; break; }
+    }
+    if (!fetched.contains(remote)) return result;
+    for (const auto& [ref, revision] : fetched.at(remote).items()) {
+        constexpr std::string_view prefix = "branches/";
+        if (ref.starts_with(prefix)) result.remote_branches.push_back({ref.substr(prefix.size()), revision.get<std::string>()});
+    }
+    if (!result.current_branch) return result;
+    const auto found = std::ranges::find(result.remote_branches, *result.current_branch, &RepositoryBranch::name);
+    if (found == result.remote_branches.end()) result.sync = BranchSync::LocalOnly;
+    else if (!result.revision) result.sync = BranchSync::Behind;
+    else result.sync = branch_sync(workspace, *result.revision, found->revision.value());
+    return result;
+#else
+    skald_unavailable();
+#endif
+}
+
+RepositoryStatus hosted_repository_status(Store& store, const std::string& id, const fs::path& folder) {
+    ManagementApi::repo_path(id);
+    const auto origin = ManagementApi::origin(store.account().server);
+    return repository_status(folder, origin + "/skald/v1/repos/" + id);
+}
+
+void create_repository_branch(const fs::path& folder, const std::string& name, const std::string& from) {
+#ifdef LOKI_HAS_SKALD
+    const auto workspace = open_workspace(folder);
+    check_skald(skald_branch(workspace.get(), name.c_str(), from.empty() ? nullptr : from.c_str()));
+#else
+    skald_unavailable();
+#endif
+}
+
+void switch_repository_branch(const fs::path& folder, const std::string& name) {
+#ifdef LOKI_HAS_SKALD
+    const auto workspace = open_workspace(folder);
+    check_skald(skald_checkout(workspace.get(), name.c_str(), 0));
+#else
+    skald_unavailable();
+#endif
+}
+
+void delete_repository_branch(const fs::path& folder, const std::string& name) {
+#ifdef LOKI_HAS_SKALD
+    const auto workspace = open_workspace(folder);
+    check_skald(skald_branch_delete(workspace.get(), name.c_str(), 0));
 #else
     skald_unavailable();
 #endif
@@ -306,8 +464,118 @@ void commit_repository_changes(const fs::path& folder, const std::string& summar
     if (author.empty()) throw std::runtime_error("Sign in to LOKI to choose the commit author.");
     const auto workspace = open_workspace(folder);
     check_skald(skald_stage(workspace.get(), "."));
+    commit_staged(workspace, summary, author);
+#else
+    skald_unavailable();
+#endif
+}
+
+void stage_repository_paths(const fs::path& folder, const std::vector<std::string>& paths, bool stage) {
+#ifdef LOKI_HAS_SKALD
+    const auto workspace = open_workspace(folder);
+    // The SDK accepts a single path, so successful paths remain staged if a later path fails.
+    for (const auto& path : paths) {
+        const auto code = stage ? skald_stage(workspace.get(), path.c_str()) : skald_unstage(workspace.get(), path.c_str());
+        try { check_skald(code); }
+        catch (const std::runtime_error& error) { throw std::runtime_error(path + ": " + error.what()); }
+    }
+#else
+    skald_unavailable();
+#endif
+}
+
+void commit_staged_repository_changes(const fs::path& folder, const std::string& summary, const std::string& author) {
+#ifdef LOKI_HAS_SKALD
+    if (summary.empty()) throw std::runtime_error("Enter a commit summary.");
+    if (author.empty()) throw std::runtime_error("Sign in to LOKI to choose the commit author.");
+    commit_staged(open_workspace(folder), summary, author);
+#else
+    skald_unavailable();
+#endif
+}
+
+std::vector<RepositoryCommit> repository_history(const fs::path& folder) {
+#ifdef LOKI_HAS_SKALD
+    return history(open_workspace(folder), nullptr, 100);
+#else
+    skald_unavailable();
+#endif
+}
+
+std::vector<RepositoryDiff> repository_working_diff(const fs::path& folder, bool staged) {
+#ifdef LOKI_HAS_SKALD
+    return differences(open_workspace(folder), nullptr, nullptr, staged);
+#else
+    skald_unavailable();
+#endif
+}
+
+std::vector<RepositoryDiff> repository_commit_diff(const fs::path& folder, const RepositoryCommit& commit) {
+#ifdef LOKI_HAS_SKALD
+    if (commit.parents.empty()) return initial_diff(workspace_root(folder), commit.root);
+    return differences(open_workspace(folder), commit.parents.front().c_str(), commit.id.c_str(), false);
+#else
+    skald_unavailable();
+#endif
+}
+
+BranchComparison compare_repository_branch(const fs::path& folder, const std::optional<std::string>& current,
+                                           const std::string& target) {
+#ifdef LOKI_HAS_SKALD
+    BranchComparison result;
+    if (current == target) return result;
+    const auto workspace = open_workspace(folder);
+    auto theirs = history(workspace, target.c_str(), comparison_history_limit);
+    if (!current) {
+        if (theirs.empty()) throw std::runtime_error("The comparison branch has no commits.");
+        result.files = initial_diff(workspace_root(folder), theirs.front().root);
+        result.history_limited = theirs.size() == comparison_history_limit;
+        result.incoming = std::move(theirs);
+        return result;
+    }
+
+    result.files = differences(workspace, current->c_str(), target.c_str(), false);
+    auto ours = history(workspace, current->c_str(), comparison_history_limit);
+    result.history_limited = ours.size() == comparison_history_limit || theirs.size() == comparison_history_limit;
+    if (!result.history_limited) {
+        std::unordered_set<std::string> our_ids, their_ids;
+        for (const auto& commit : ours) our_ids.insert(commit.id);
+        for (const auto& commit : theirs) their_ids.insert(commit.id);
+        std::erase_if(ours, [&](const RepositoryCommit& commit) { return their_ids.contains(commit.id); });
+        std::erase_if(theirs, [&](const RepositoryCommit& commit) { return our_ids.contains(commit.id); });
+        result.current_only = std::move(ours);
+        result.incoming = std::move(theirs);
+    }
+    return result;
+#else
+    skald_unavailable();
+#endif
+}
+
+std::vector<std::string> merge_repository_branch(const fs::path& folder, const std::optional<std::string>& branch,
+                                                const std::optional<std::string>& current,
+                                                const std::string& target, const std::string& author,
+                                                const std::string& summary) {
+#ifdef LOKI_HAS_SKALD
+    if (!branch) throw std::runtime_error("Switch to a local branch before merging.");
+    if (author.empty()) throw std::runtime_error("Sign in to LOKI to choose the commit author.");
+    const auto workspace = open_workspace(folder);
+    const auto info = status(workspace);
+    if (info.at("branch") != *branch ||
+        (current ? info.at("revision") != *current : !info.at("revision").is_null()))
+        throw std::runtime_error("The current branch changed. Compare the branches again before merging.");
     SkaldOutput result;
-    check_skald(skald_commit(workspace.get(), author.c_str(), summary.c_str(), result.out()));
+    const auto code = skald_merge(workspace.get(), target.c_str(), author.c_str(), summary.c_str(), result.out());
+    return merge_conflicts(code, result);
+#else
+    skald_unavailable();
+#endif
+}
+
+void abort_repository_merge(const fs::path& folder) {
+#ifdef LOKI_HAS_SKALD
+    const auto workspace = open_workspace(folder);
+    check_skald(skald_merge_abort(workspace.get()));
 #else
     skald_unavailable();
 #endif
