@@ -2,7 +2,9 @@
 #include "sha256.hpp"
 #include "store.hpp"
 #include <curl/curl.h>
+#include <algorithm>
 #include <cctype>
+#include <set>
 #include <fstream>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -110,34 +112,171 @@ void FilesApi::sign_out() { api_.ok("DELETE", "/auth/v1/device"); }
 std::vector<Share> FilesApi::shares() {
     std::vector<Share> out;
     const auto o = json::parse(api_.ok("GET", "/files/v1/shares"));
-    for (const auto& s : o.at("shares")) out.push_back({s.at("id"),s.at("name")});
+    for (const auto& s : o.at("shares")) out.push_back({s.at("id"),s.at("name"),s.value("supports_updates",false)});
     return out;
 }
-std::vector<Share> FilesApi::app_repositories() {
-    try {
-        const auto result = json::parse(api_.ok("GET", "/files/v1/app-repositories"));
-        std::vector<Share> repositories;
-        for (const auto& share : result.at("shares")) repositories.push_back({share.at("id"), share.at("name")});
-        return repositories;
-    } catch (const ApiError& error) {
-        if (error.status != 404) throw;
-        throw std::runtime_error("App repositories require a newer LOKI server.");
-    } catch (const json::parse_error&) {
-        throw std::runtime_error("App repositories require a newer LOKI server.");
+
+bool valid_file_hash(const std::string& hash) {
+    return hash.size() == 64 && hash.find_first_not_of("0123456789abcdef") == std::string::npos;
+}
+
+fs::path safe_download_path(const std::string& path) {
+    const auto invalid = [] { throw std::runtime_error("The server returned an unsafe download path."); };
+    fs::path result;
+    std::size_t from = 0;
+    while (true) {
+        const auto slash = path.find('/', from);
+        const auto name = path.substr(from, slash == std::string::npos ? slash : slash - from);
+        if (name.empty() || name.back() == '.' || name.back() == ' ' ||
+            name.find_first_of("\\:<>\"|?*") != std::string::npos ||
+            std::ranges::any_of(name, [](unsigned char c) { return c < 32 || c == 127; })) invalid();
+        auto stem = name.substr(0, name.find('.'));
+        while (!stem.empty() && stem.back() == ' ') stem.pop_back();
+        for (auto& c : stem) if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
+        if (stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" ||
+            stem == "CONIN$" || stem == "CONOUT$" ||
+            ((stem.starts_with("COM") || stem.starts_with("LPT")) &&
+             ((stem.size() == 4 && stem[3] >= '0' && stem[3] <= '9') ||
+              stem.substr(3) == "\xc2\xb9" || stem.substr(3) == "\xc2\xb2" || stem.substr(3) == "\xc2\xb3"))) invalid();
+        result /= path_from_utf8(name);
+        if (slash == std::string::npos) return result;
+        from = slash + 1;
     }
 }
 
-std::vector<PublishedApp> FilesApi::catalog(const std::string& share) {
-    const auto result = json::parse(api_.ok("GET", "/files/v1/app-repositories/" + enc(share)));
-    std::vector<PublishedApp> apps;
-    for (const auto& entry : result.at("apps")) {
-        PublishedApp app{entry.at("id"), entry.at("name"), {}, {}};
-        if (entry.at("version").is_string()) app.version = entry.at("version");
-        for (const auto& [platform, build] : entry.at("builds").items())
-            app.builds.emplace(platform, AppBuild{build.at("path"), build.at("name"), build.at("size")});
-        apps.push_back(std::move(app));
+std::string FilesApi::scan(const std::string& path, const std::function<bool()>& active) {
+    // The server may have to read a large folder before it can send the first byte.
+    auto response = api_.request("GET", path, nullptr, nullptr, nullptr, 1800, active ? &active : nullptr);
+    if (response.status < 200 || response.status >= 300) Api::fail(response);
+    return std::move(response.body);
+}
+
+DownloadManifest FilesApi::manifest(const std::string& share, const std::string& path, bool update,
+                                    const std::function<bool()>& active) {
+    const auto body = json::parse(scan(route(share, "manifest", path) + (update ? "&update=true" : ""), active));
+    DownloadManifest result{body.at("directory"), body.at("revision"), {}};
+    if (!valid_file_hash(result.revision) || !body.at("entries").is_array() || body.at("entries").size() > 100000)
+        throw std::runtime_error("Invalid download manifest.");
+    for (const auto& entry : body.at("entries")) {
+        const auto name = entry.at("path").get<std::string>();
+        if (result.directory) safe_download_path(name);
+        else if (!name.empty() || entry.at("directory").get<bool>()) throw std::runtime_error("Invalid file manifest.");
+        DownloadEntry item{entry.at("directory"), {}};
+        if (!item.directory) {
+            item.file = {entry.at("size"), entry.at("sha256"),
+                         entry.at("last_modified").is_null() ? "" : entry.at("last_modified").get<std::string>()};
+            if (item.file.size < 0 || !valid_file_hash(item.file.sha256))
+                throw std::runtime_error("Invalid file in the download manifest.");
+        }
+        if (!result.entries.emplace(name, std::move(item)).second)
+            throw std::runtime_error("Duplicate path in the download manifest.");
     }
-    return apps;
+    if (!result.directory && result.entries.size() != 1)
+        throw std::runtime_error("The file manifest is missing the selected file.");
+    for (const auto& [name, item] : result.entries) {
+        const auto slash = name.rfind('/');
+        if (slash == std::string::npos) continue;
+        const auto parent = result.entries.find(name.substr(0, slash));
+        if (parent == result.entries.end() || !parent->second.directory)
+            throw std::runtime_error("The download manifest is missing a parent folder.");
+    }
+    return result;
+}
+
+std::vector<FileChunk> FilesApi::chunks(const std::string& share, const std::string& path, const FileMetadata& file,
+                                        const std::function<bool()>& active) {
+    std::vector<FileChunk> output;
+    std::int64_t offset = 0;
+    do {
+        const auto body = json::parse(scan(route(share, "chunks", path) + "&sha256=" + file.sha256
+                                          + "&offset=" + std::to_string(offset), active));
+        if (!body.at("chunks").is_array() || body.at("chunks").size() > 4096)
+            throw std::runtime_error("Invalid chunk list.");
+        const auto start = offset;
+        for (const auto& value : body.at("chunks")) {
+            FileChunk chunk{value.at("offset"), value.at("size"), value.at("sha256")};
+            if (chunk.offset != offset || chunk.size <= 0 || chunk.size > 4 * 1024 * 1024 ||
+                chunk.size > file.size - offset || !valid_file_hash(chunk.sha256))
+                throw std::runtime_error("Invalid chunk in the download manifest.");
+            offset += chunk.size;
+            output.push_back(std::move(chunk));
+        }
+        const auto& next = body.at("next_offset");
+        if (next.is_null() && offset == file.size) return output;
+        if (next.is_null() || start == offset || offset >= file.size || next.get<std::int64_t>() != offset)
+            throw std::runtime_error("Invalid chunk page.");
+    } while (true);
+}
+
+std::string FilesApi::range(const std::string& share, const std::string& path, const FileMetadata& file,
+                            std::int64_t offset, std::int64_t size, const std::function<bool()>& active) {
+    if (offset < 0 || size <= 0 || size > 16 * 1024 * 1024 || offset > file.size || size > file.size - offset)
+        throw std::runtime_error("Invalid byte range.");
+    struct Range {
+        std::string body, content_range;
+        size_t size;
+        const std::function<bool()>* active;
+    } transfer{{}, {}, size_t(size), &active};
+    std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
+    if (!curl) throw std::runtime_error("Could not start the download.");
+    const auto end = offset + size - 1;
+    const auto requested = std::to_string(offset) + "-" + std::to_string(end);
+    const auto url = api_.base() + route(share, "file", path);
+    std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(
+        curl_slist_append(nullptr, ("Authorization: Bearer " + token_).c_str()), curl_slist_free_all);
+    if (!headers) throw std::runtime_error("Could not prepare the download.");
+    auto* h = curl.get();
+    curl_easy_setopt(h, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers.get());
+    curl_easy_setopt(h, CURLOPT_RANGE, requested.c_str());
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 15L);
+    curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, 90L);
+    curl_easy_setopt(h, CURLOPT_HEADERDATA, &transfer);
+    curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, +[](char* data, size_t size, size_t count, void* opaque) -> size_t {
+        auto& range = *static_cast<Range*>(opaque);
+        const auto length = size * count;
+        try {
+            std::string line(data, length);
+            if (line.starts_with("HTTP/")) range.content_range.clear();
+            const auto colon = line.find(':');
+            if (colon != std::string::npos) {
+                auto key = line.substr(0, colon);
+                for (auto& c : key) c = char(std::tolower(static_cast<unsigned char>(c)));
+                if (key == "content-range") {
+                    const auto first = line.find_first_not_of(" \t", colon + 1);
+                    const auto last = line.find_last_not_of(" \r\n\t");
+                    if (first != std::string::npos) range.content_range = line.substr(first, last - first + 1);
+                }
+            }
+            return length;
+        } catch (...) { return 0; }
+    });
+    curl_easy_setopt(h, CURLOPT_WRITEDATA, &transfer);
+    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, +[](char* data, size_t size, size_t count, void* opaque) -> size_t {
+        auto& range = *static_cast<Range*>(opaque);
+        const auto length = size * count;
+        if (length > range.size - range.body.size()) return 0;
+        try { range.body.append(data, length); }
+        catch (...) { return 0; }
+        return length;
+    });
+    curl_easy_setopt(h, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(h, CURLOPT_XFERINFODATA, &transfer);
+    curl_easy_setopt(h, CURLOPT_XFERINFOFUNCTION, +[](void* opaque, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+        try { return (*static_cast<Range*>(opaque)->active)() ? 0 : 1; }
+        catch (...) { return 1; }
+    });
+    const auto result = curl_easy_perform(h);
+    long status = 0;
+    curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
+    if (result == CURLE_ABORTED_BY_CALLBACK) throw std::runtime_error("Download cancelled.");
+    if (status >= 400 && result == CURLE_OK) Api::fail({status, transfer.body});
+    const auto expected = "bytes " + std::to_string(offset) + "-" + std::to_string(end) + "/" + std::to_string(file.size);
+    if (result != CURLE_OK || status != 206 || transfer.content_range != expected || transfer.body.size() != size_t(size))
+        throw std::runtime_error("The server returned an incomplete or unexpected range. Check for updates and retry.");
+    return std::move(transfer.body);
 }
 
 ShareListing FilesApi::entries(const std::string& share, const std::string& path, int page) {
@@ -149,7 +288,7 @@ ShareListing FilesApi::entries(const std::string& share, const std::string& path
 FileMetadata FilesApi::metadata(const std::string& share, const std::string& path) {
     const auto o = json::parse(api_.ok("GET", route(share,"metadata",path) + "&checksum=true"));
     FileMetadata out{o.at("size"),o.at("sha256"),o.value("last_modified",json()).is_null() ? "" : o.at("last_modified").get<std::string>()};
-    if (out.size < 0 || out.sha256.size() != 64 || out.sha256.find_first_not_of("0123456789abcdef") != std::string::npos)
+    if (out.size < 0 || !valid_file_hash(out.sha256))
         throw std::runtime_error("The server returned invalid file metadata.");
     return out;
 }

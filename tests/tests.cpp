@@ -13,7 +13,7 @@
 #include "index.hpp"
 #include "sha256.hpp"
 #include "files_api.hpp"
-#include "apps_api.hpp"
+#include "file_downloads.hpp"
 #include "commands.hpp"
 #include "client_update.hpp"
 #include <nlohmann/json.hpp>
@@ -165,24 +165,66 @@ static void shared_files(const std::string& server) {
     account.sign_in(server,session);
     CHECK(account.files_api().shares().at(0).name == "Archive");
     CHECK(account.api().sync_access()); // The same saved credential serves both APIs.
-    AppDownloads apps(account);
-    auto catalog = apps.catalog();
-    CHECK(catalog.errors.empty() && catalog.apps.size() == 1);
-    auto app = catalog.apps.at(0);
-    CHECK(app.build.has_value() && app.downloaded.empty());
-    const auto install = [&](const AvailableApp& entry) {
-        return apps.download(entry, [](auto, auto) { return true; }, [] { return true; });
-    };
-    const auto package = install(app);
-    CHECK(read(package) == "old");
-    CHECK(!apps.catalog().apps.at(0).update);
-    // The fixture publishes another build at the same path, size and modified date.
-    api.sign_out();
-    app = apps.catalog().apps.at(0);
-    CHECK(app.downloaded == package && app.update);
-    CHECK(install(app) == package);
-    CHECK(read(package) == "new");
-    CHECK(!apps.catalog().apps.at(0).update);
+    FileDownloads downloads(account);
+    const auto share = api.shares().at(0);
+    const auto active = [](auto, auto) { return true; };
+    const auto game = dir / "Game";
+    downloads.download(share, "Game", true, game, active);
+    CHECK(fs::is_directory(game / "assets" / "empty"));
+    CHECK(read(game / "assets" / "keep.txt") == "unchanged");
+    CHECK(read(game / "old.txt") == "remove");
+    const auto executable = game / "game.exe";
+    const auto before = Sha256::of_file(executable);
+    auto tracked = FileDownloads(account).check().at(0);
+    CHECK(tracked.status == DownloadStatus::current);
+    write(game / "user-save.dat", "my game save");
+    const auto id = tracked.item.id;
+    api.sign_out(); // The fixture publishes a changed game at the same source path.
+    CHECK(downloads.check().at(0).status == DownloadStatus::available);
+    try { downloads.update(id, [](auto, auto) { return false; }); CHECK(false); }
+    catch (const std::runtime_error&) { CHECK(Sha256::of_file(executable) == before); }
+    write(executable, "local customization");
+    try { downloads.update(id, active); CHECK(false); }
+    catch (const std::runtime_error&) { CHECK(read(executable) == "local customization"); }
+    fs::remove(executable);
+    // Restore the original baseline so this update exercises binary patching.
+    const auto baseline = api.download("archive", "baseline", dir, active);
+    fs::copy_file(baseline, executable);
+    CHECK(Sha256::of_file(executable) == before);
+    try { downloads.update(id, active); CHECK(false); }
+    catch (const std::runtime_error& error) {
+        CHECK(std::string(error.what()).find("changed during the update") != std::string::npos);
+        CHECK(Sha256::of_file(executable) == before && fs::exists(game / "old.txt"));
+    }
+    downloads.update(id, active);
+    CHECK(Sha256::of_file(executable) == api.metadata("archive", "Game/game.exe").sha256);
+    CHECK(!fs::exists(game / "old.txt"));
+    CHECK(read(game / "new.txt") == "added");
+    CHECK(read(game / "user-save.dat") == "my game save");
+    CHECK(downloads.check().at(0).status == DownloadStatus::current);
+
+    const auto moved = dir / "Moved";
+    fs::rename(game, moved);
+    CHECK(downloads.check().at(0).status == DownloadStatus::missing);
+    write(moved / "assets" / "keep.txt", "my local changes");
+    downloads.locate(id, moved);
+    CHECK(downloads.check().at(0).item.destination == moved);
+    downloads.download(share, "Game/new.txt", false, game, active);
+    auto checks = downloads.check();
+    CHECK(checks.size() == 2);
+    for (const auto& check : checks) if (check.item.id != id) downloads.forget(check.item.id);
+    fs::remove_all(moved);
+    CHECK(downloads.check().at(0).can_download);
+    downloads.redownload(id, moved, active);
+    CHECK(read(moved / "new.txt") == "added");
+    downloads.forget(id);
+    CHECK(downloads.check().empty() && fs::exists(moved / "game.exe"));
+
+    const auto solo = dir / "solo.txt";
+    downloads.download(share, "Game/new.txt", false, solo, active);
+    CHECK(downloads.check().at(0).item.destination == solo);
+    CHECK(read(solo) == "added");
+    downloads.forget(downloads.check().at(0).item.id);
 
     const auto original = api.download("archive","日本語 + #.bin",dir,[](auto,auto) { return true; });
     const auto contents = read(original);

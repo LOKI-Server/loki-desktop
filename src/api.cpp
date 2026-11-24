@@ -86,7 +86,9 @@ std::string Api::normalize(std::string url) {
 }
 
 Api::Response Api::request(const std::string& method, const std::string& path, const std::string* body,
-                           const std::filesystem::path* upload, const std::filesystem::path* download) {
+                           const std::filesystem::path* upload, const std::filesystem::path* download,
+                           long idle_seconds, const std::function<bool()>* active) {
+    if (active && !(*active)()) throw std::runtime_error("Download cancelled.");
     std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
     if (!curl) throw std::runtime_error("Could not start a network request.");
     auto* h = curl.get();
@@ -102,7 +104,15 @@ Api::Response Api::request(const std::string& method, const std::string& path, c
     curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
     // Give up on stalled transfers without capping long uploads.
     curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);
-    curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, 90L);
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, idle_seconds);
+    if (active) {
+        curl_easy_setopt(h, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(h, CURLOPT_XFERINFODATA, active);
+        curl_easy_setopt(h, CURLOPT_XFERINFOFUNCTION, +[](void* context, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+            try { return (*static_cast<const std::function<bool()>*>(context))() ? 0 : 1; }
+            catch (...) { return 1; }
+        });
+    }
     if (method == "HEAD") curl_easy_setopt(h, CURLOPT_NOBODY, 1L);
 
     std::unique_ptr<std::FILE, decltype(&std::fclose)> in(nullptr, std::fclose);
@@ -132,6 +142,7 @@ Api::Response Api::request(const std::string& method, const std::string& path, c
     curl_easy_setopt(h, CURLOPT_WRITEDATA, &sink);
 
     const auto code = curl_easy_perform(h);
+    if (active && code == CURLE_ABORTED_BY_CALLBACK) throw std::runtime_error("Download cancelled.");
     if (code != CURLE_OK) {
         throw std::runtime_error(std::string("Could not reach the server: ") + curl_easy_strerror(code));
     }

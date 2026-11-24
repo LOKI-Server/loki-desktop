@@ -4,12 +4,7 @@
 #include <map>
 
 namespace loki {
-struct Share { std::string id, name; };
-struct AppBuild { std::string path, filename; std::int64_t size = 0; };
-struct PublishedApp {
-    std::string id, name, version;
-    std::map<std::string, AppBuild> builds;
-};
+struct Share { std::string id, name; bool supports_updates = false; };
 struct ShareEntry {
     std::string name;
     bool directory = false;
@@ -24,6 +19,21 @@ struct FileMetadata {
     std::int64_t size = 0;
     std::string sha256, last_modified;
 };
+struct DownloadEntry {
+    bool directory = false;
+    FileMetadata file;
+};
+struct DownloadManifest {
+    bool directory = false;
+    std::string revision;
+    std::map<std::string, DownloadEntry> entries;
+};
+struct FileChunk {
+    std::int64_t offset, size;
+    std::string sha256;
+};
+bool valid_file_hash(const std::string& hash);
+std::filesystem::path safe_download_path(const std::string& path);
 
 /** Read-only share access. Calls block and reuse the account device credential. */
 class FilesApi {
@@ -34,8 +44,12 @@ public:
                   const std::string& device, const std::string& platform);
     void sign_out();
     std::vector<Share> shares();
-    std::vector<Share> app_repositories();
-    std::vector<PublishedApp> catalog(const std::string& share);
+    DownloadManifest manifest(const std::string& share, const std::string& path, bool update = false,
+                              const std::function<bool()>& active = {});
+    std::vector<FileChunk> chunks(const std::string& share, const std::string& path, const FileMetadata& file,
+                                  const std::function<bool()>& active);
+    std::string range(const std::string& share, const std::string& path, const FileMetadata& file,
+                      std::int64_t offset, std::int64_t size, const std::function<bool()>& active);
     ShareListing entries(const std::string& share, const std::string& path, int page = 0);
     FileMetadata metadata(const std::string& share, const std::string& path);
     /** Resume into a cache file; returns it only after size and SHA-256 verification.
@@ -45,6 +59,7 @@ public:
         const std::function<bool(std::int64_t, std::int64_t)>& progress,
         const FileMetadata* expected = nullptr);
 private:
+    std::string scan(const std::string& path, const std::function<bool()>& active);
     Api api_;
     std::string token_;
 };

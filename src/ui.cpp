@@ -16,7 +16,7 @@ const wxColour kLogoGreen(28, 122, 72);
 // Sidebar icons from LOKI's web dashboard (static/lib/icons.js), stroked on a 24px grid.
 const char* const kSyncIcon = "M4 10a8 8 0 0 1 14.5-4.5L20 7M20 3v4h-4M20 14a8 8 0 0 1-14.5 4.5L4 17M4 21v-4h4M9 12l2 2 4-4";
 const char* const kFolderIcon = "M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2.5h8.5A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z";
-const char* const kAppsIcon = "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z";
+const char* const kUpdatesIcon = "M20 7v5h-5M20 12a8 8 0 0 0-14-5M4 17v-5h5M4 12a8 8 0 0 0 14 5";
 const char* const kRepoIcon = "M5 4a2 2 0 0 1 2-2h12v16H7a2 2 0 0 0-2 2zM5 20a2 2 0 0 0 2 2h12v-4M9 6h6";
 
 /** A dashboard icon drawn in `colour`, `size` pixels square, inside a `width` by `height` transparent cell. */
@@ -170,7 +170,7 @@ Sidebar::Sidebar(wxWindow* parent, std::vector<wxString> pages) : wxPanel(parent
     nav_->SetBackgroundColour(background);
     nav_->SetFont(nav_->GetFont().Scaled(1.05f));
     // Grey like the dashboard's sidebar, and green for the open page.
-    const char* const icons[] = {kSyncIcon, kFolderIcon, kAppsIcon, kRepoIcon};
+    const char* const icons[] = {kSyncIcon, kFolderIcon, kUpdatesIcon, kRepoIcon};
     const int size = FromDIP(18), width = FromDIP(30), height = FromDIP(36);
     images_ = std::make_unique<wxImageList>(width, height, false);
     for (const auto& colour : {wxColour(95, 122, 105), kLogoGreen})

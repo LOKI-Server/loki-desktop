@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0
+
+- Download whole folders from the file browser.
+- Check for updates to downloaded files and folders on shares that support updates.
+- Reuse unchanged bytes in large files, and locate or redownload missing items.
+
 ## 0.4.0
 
 - Organize repository controls into **Sync**, **Branches**, and **Working changes**.

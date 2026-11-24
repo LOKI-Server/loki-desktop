@@ -97,15 +97,19 @@ Downloaded files do not create sync mappings or upload anything to the server.
 **Account settings** opens the server account page, where **Devices** handles
 pairing, renaming, and revocation. Signing out of the app signs out both features.
 
-## Download and update apps
+## Download and update shared files and folders
 
-**Apps** lists the app repositories shared with your account and selects the
-build for your OS. Choose **Download** to save a package or **Update** to get
-the latest build. **Check for updates** compares package checksums, so replacing
-a server file in place still shows an update. Packages are saved under the
-desktop profile. **Open download folder** opens the selected package's folder.
-LOKI verifies downloaded packages and leaves installation and launch to you.
-App catalogs require an updated LOKI server.
+In **Browse files**, select a file or folder and choose **Download**. A
+folder download keeps its subfolders and files together. Downloads from a
+file server with **Support updates** enabled also appear in **Updates**.
+Choose **Check for updates**, then select which item to update. Desktop
+reuses unchanged files and matching parts of large files. It verifies the
+result before replacing your files.
+
+If a download is missing, locate the copy you moved, remove it from the list,
+or redownload it. When server changes conflict with local edits, Desktop
+leaves your files in place and shows where the conflict occurred. Folder
+downloads and tracked updates require an updated LOKI server.
 
 ## How syncing works
 

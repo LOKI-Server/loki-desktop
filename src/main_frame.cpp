@@ -73,7 +73,7 @@ enum Command {
     kCheckUpdates,
     kFirstPage,  // One command per page follows.
 };
-const wxString kPages[] = {"Save sync", "Browse files", "Apps", "Repositories"};
+const wxString kPages[] = {"Save sync", "Browse files", "Updates", "Repositories"};
 
 class Tray : public wxTaskBarIcon {
 public:
@@ -391,7 +391,7 @@ wxPanel* MainFrame::BuildWorkspace(wxWindow* parent) {
     pages_ = new wxSimplebook(workspace);
     pages_->AddPage(BuildFolders(pages_), kPages[0]);
     pages_->AddPage(build_file_browser(pages_, store_), kPages[1]);
-    pages_->AddPage(build_apps_page(pages_, store_), kPages[2]);
+    pages_->AddPage(build_updates_page(pages_, store_), kPages[2]);
     pages_->AddPage(build_repository_page(pages_, store_), kPages[3]);
     for (size_t i = 0; i < pages_->GetPageCount(); ++i) pages_->GetPage(i)->SetBackgroundColour(ui::page_background());
     row->Add(pages_, 1, wxEXPAND);
@@ -407,7 +407,7 @@ void MainFrame::OpenPage(int index) {
     sidebar_->SetAccount(W(store_.display_name()), W(store_.server()));
     switch (index) {
         case 1: activate_file_browser(static_cast<wxPanel*>(pages_->GetPage(1))); break;
-        case 2: activate_apps_page(static_cast<wxPanel*>(pages_->GetPage(2))); break;
+        case 2: activate_updates_page(static_cast<wxPanel*>(pages_->GetPage(2))); break;
         case 3: activate_repository_page(static_cast<wxPanel*>(pages_->GetPage(3))); break;
     }
     Layout();
@@ -648,7 +648,7 @@ void MainFrame::ProfileChanged() {
                 folders_.clear();
                 list_->DeleteAllItems();
                 activate_file_browser(static_cast<wxPanel*>(pages_->GetPage(1)));
-                activate_apps_page(static_cast<wxPanel*>(pages_->GetPage(2)));
+                activate_updates_page(static_cast<wxPanel*>(pages_->GetPage(2)));
                 activate_repository_page(static_cast<wxPanel*>(pages_->GetPage(3)));
                 discovered_.reset();
                 ShowConnectStep();

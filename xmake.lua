@@ -5,7 +5,7 @@
 --   xmake test            # engine and hashing tests
 
 set_project("loki-sync")
-set_version("0.4.0")
+set_version("0.5.0")
 set_xmakever("2.9.0")
 set_languages("c++20")
 add_rules("mode.debug", "mode.release")
@@ -54,7 +54,7 @@ end
 target("loki-core")
     set_kind("static")
     add_files("src/api.cpp", "src/files_api.cpp", "src/engine.cpp", "src/index.cpp", "src/sha256.cpp", "src/store.cpp",
-              "src/management_api.cpp", "src/client_update.cpp", "src/desktop.cpp", "src/commands.cpp", "src/apps_api.cpp")
+              "src/management_api.cpp", "src/client_update.cpp", "src/desktop.cpp", "src/commands.cpp", "src/file_downloads.cpp")
     add_includedirs("src", {public = true})
     add_packages("libcurl", "nlohmann_json", {public = true})
     if skald_supported then

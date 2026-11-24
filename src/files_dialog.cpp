@@ -1,12 +1,14 @@
 #include "files_dialog.hpp"
 #include "files_api.hpp"
-#include "desktop.hpp"
+#include "file_downloads.hpp"
 #include "ui.hpp"
 #include <wx/wx.h>
 #include <wx/filedlg.h>
+#include <wx/dirdlg.h>
 #include <wx/filename.h>
 #include <wx/listctrl.h>
 #include <wx/utils.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -27,7 +29,7 @@ struct Hold {
 class FilesPage : public wxPanel {
 public:
     FilesPage(wxWindow* parent, Store& store)
-        : wxPanel(parent), account_(store), cache_(store.directory() / "downloads") {
+        : wxPanel(parent), account_(store) {
         auto* contents = new wxBoxSizer(wxVERTICAL);
         auto header = ui::page_header(this, "Browse files", "Shared folders on your LOKI server");
         refresh_ = ui::button(this, header.actions, "Refresh", [this] {
@@ -70,7 +72,7 @@ public:
         contents->Add(gauge_, 0, wxEXPAND | wxTOP, FromDIP(10));
 
         auto* actions = new wxBoxSizer(wxHORIZONTAL);
-        download_ = ui::button(this, actions, wxS("Download…"), [this] { OpenSelected(); });
+        download_ = ui::button(this, actions, wxS("Download…"), [this] { DownloadRow(Selected()); });
         cancel_ = ui::button(this, actions, "Cancel download", [this] { *cancelled_ = true; cancel_->Disable(); });
         actions->AddStretchSpacer();
         page_label_ = new wxStaticText(this, wxID_ANY, "");
@@ -184,10 +186,10 @@ private:
         prev_->Enable(!busy_&&!share_.empty()&&page_>0);
         next_->Enable(!busy_&&!share_.empty()&&page_<999&&(std::int64_t(page_)+1)*100<listing_.total);
         const auto row=Selected();
-        const bool file=!share_.empty()&&row>=0&&size_t(row)<listing_.entries.size()&&!listing_.entries[size_t(row)].directory;
-        download_->Enable(!busy_&&file);
+        const bool entry=!share_.empty()&&row>=0&&size_t(row)<listing_.entries.size();
+        download_->Enable(!busy_&&entry);
+        download_->SetLabel(entry && listing_.entries[size_t(row)].directory ? wxS("Download folder…") : wxS("Download…"));
     }
-    void OpenSelected() { OpenRow(Selected()); }
     void OpenRow(long row) {
         if (busy_ || rebuilding_ || row<0) return;
         if (share_.empty()) {
@@ -198,18 +200,49 @@ private:
         const auto entry=listing_.entries[size_t(row)];
         const auto path=path_.empty() ? entry.name : path_+"/"+entry.name;
         if (entry.directory) { LoadEntries(path,0); return; }
-        // Server names are only a suggested leaf name, never a local path.
-        auto name=W(entry.name); for (auto c : {wxS("/"),wxS("\\"),wxS(":"),wxS("<"),wxS(">"),wxS("\""),wxS("|"),wxS("?"),wxS("*"),wxS("\r"),wxS("\n")}) name.Replace(c,"_");
-        wxFileDialog save(this,"Save downloaded file","",name,"All files (*.*)|*.*",wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
-        if (save.ShowModal()!=wxID_OK) return;
-        const auto destination=path_from_utf8(U(save.GetPath()));
-        auto api=Api(); const auto share=share_; const auto cache=cache_; auto alive=alive_;
+        DownloadRow(row);
+    }
+
+    void DownloadRow(long row) {
+        if (busy_ || rebuilding_ || share_.empty() || row < 0 || size_t(row) >= listing_.entries.size()) return;
+        const auto entry = listing_.entries[size_t(row)];
+        const auto source = path_.empty() ? entry.name : path_ + "/" + entry.name;
+        const auto selected = std::ranges::find(shares_, share_, &Share::id);
+        if (selected == shares_.end()) return;
+        auto share = *selected;
+        fs::path destination;
+        auto name = W(entry.name);
+        if (entry.directory) {
+            fs::path leaf;
+            try {
+                leaf = safe_download_path(entry.name);
+                if (leaf.has_parent_path()) throw std::runtime_error("Invalid folder name.");
+            } catch (const std::exception& error) {
+                status_->Error(W(error.what()));
+                return;
+            }
+            wxDirDialog save(this, "Choose where to save the downloaded folder", {}, wxDD_DIR_MUST_EXIST);
+            if (save.ShowModal() != wxID_OK) return;
+            destination = path_from_utf8(U(save.GetPath())) / leaf;
+        } else {
+            for (auto c : {wxS("/"),wxS("\\"),wxS(":"),wxS("<"),wxS(">"),wxS("\""),wxS("|"),wxS("?"),wxS("*"),wxS("\r"),wxS("\n")})
+                name.Replace(c,"_");
+            wxFileDialog save(this, "Save downloaded file", "", name, "All files (*.*)|*.*", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+            if (save.ShowModal() != wxID_OK) return;
+            destination = path_from_utf8(U(save.GetPath()));
+        }
+        const auto profile = account_.directory();
+        const auto session = session_;
+        const auto alive = alive_;
         auto cancel=cancelled_=std::make_shared<std::atomic<bool>>(false);
         auto* dispatcher=wxTheApp;
-        Work([api,share,path,cache,destination,alive,cancel,dispatcher,this]() mutable {
+        Work([profile,session,share,source,entry,destination,alive,cancel,dispatcher,this] {
+            Store store(profile);
+            if (store.token() != session) throw std::runtime_error("The signed-in account changed.");
             auto last=std::chrono::steady_clock::time_point{};
-            Desktop::download(api,cache,share,path,destination,[&](std::int64_t received,std::int64_t total) {
+            FileDownloads(store).download(share, source, entry.directory, destination, [&](std::int64_t received,std::int64_t total) {
                 if (!*alive||*cancel) return false;
+                if (received < 0 || total == 0) return true;
                 const auto now=std::chrono::steady_clock::now();
                 if (now-last>std::chrono::milliseconds(150)) {
                     last=now;
@@ -222,11 +255,11 @@ private:
                     });
                 }
                 return true;
-            }, [alive,cancel] { return alive->load() && !cancel->load(); });
+            });
         },[this,name] { status_->Success("Downloaded "+name+" and verified its checksum."); });
         cancel_->Enable(); cancel_->Show(); gauge_->Show(); status_->Info(wxS("Preparing download…")); Layout();
     }
-    Store& account_; fs::path cache_;
+    Store& account_;
     std::shared_ptr<std::atomic<bool>> alive_=std::make_shared<std::atomic<bool>>(true);
     std::shared_ptr<std::atomic<bool>> cancelled_=std::make_shared<std::atomic<bool>>(false);
     bool busy_=false, rebuilding_=false, pending_=false;

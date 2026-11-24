@@ -2,6 +2,7 @@
 // The LOKI /sync/v1 client. Calls block; run them off the UI thread.
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -112,7 +113,8 @@ private:
         std::string body;
     };
     Response request(const std::string& method, const std::string& path, const std::string* json = nullptr,
-                     const std::filesystem::path* upload = nullptr, const std::filesystem::path* download = nullptr);
+                     const std::filesystem::path* upload = nullptr, const std::filesystem::path* download = nullptr,
+                     long idle_seconds = 90, const std::function<bool()>* active = nullptr);
     std::string ok(const std::string& method, const std::string& path, const std::string* json = nullptr);
     [[noreturn]] static void fail(const Response& r);
 
