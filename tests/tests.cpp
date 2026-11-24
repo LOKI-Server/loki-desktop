@@ -381,6 +381,43 @@ static void skald_working_copy() {
     fs::remove_all(directory);
 }
 
+static void link_plain_repository_folder() {
+    const auto directory = scratch("skald-link");
+    const auto folder = directory / "project";
+    const auto nested = folder / "assets";
+    write(nested / "level.txt", "map data");
+    write(folder / ".gitignore", "build/\n");
+    const auto plain = inspect_repository_folder(folder);
+    CHECK(fs::equivalent(plain.root, folder));
+    CHECK(!plain.initialized && plain.can_rename_ignore);
+    CHECK(!fs::exists(folder / ".skald"));
+
+    initialize_repository_folder(plain.root);
+    initialize_repository_folder(plain.root);
+    const auto initialized = inspect_repository_folder(nested);
+    CHECK(initialized.initialized && initialized.can_rename_ignore);
+    CHECK(fs::equivalent(initialized.root, folder));
+    Store store(directory / "profile");
+    const auto* id = "01234567-89ab-cdef-0123-456789abcdef";
+    link_repository_folder(store, id, initialized.root);
+    CHECK(fs::equivalent(repository_folder(store, id), folder));
+    CHECK(read(nested / "level.txt") == "map data");
+
+    rename_repository_ignore(initialized.root);
+    CHECK(!fs::exists(folder / ".gitignore"));
+    CHECK(read(folder / ".skaldignore") == "build/\n");
+    write(folder / "build/ignored.txt", "ignore me");
+    CHECK(repository_status(folder).changes.find("ignored.txt") == std::string::npos);
+
+    write(folder / ".gitignore", "cache/\n");
+    CHECK(!inspect_repository_folder(nested).can_rename_ignore);
+    try { rename_repository_ignore(folder); CHECK(false); }
+    catch (const std::runtime_error&) {}
+    CHECK(read(folder / ".gitignore") == "cache/\n");
+    CHECK(read(folder / ".skaldignore") == "build/\n");
+    fs::remove_all(directory);
+}
+
 static void skald_repository_workflows() {
     const auto folder = scratch("skald-workflows");
     constexpr auto remote_url = "https://loki.example/skald/v1/repos/project";
@@ -545,6 +582,7 @@ int main() try {
     repository_listings();
 #ifdef LOKI_HAS_SKALD
     skald_working_copy();
+    link_plain_repository_folder();
     skald_repository_workflows();
 #endif
     hashing();

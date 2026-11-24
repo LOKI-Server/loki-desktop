@@ -659,14 +659,46 @@ private:
     void Link() {
         const auto* repo = Selected();
         if (!repo) return;
-        wxDirDialog choose(this, "Choose an existing local Skald working copy");
+        const auto id = repo->id;
+        wxDirDialog choose(this, "Choose a local folder to link", "", wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
         if (choose.ShowModal() != wxID_OK) return;
         const auto path = path_from_utf8(U(choose.GetPath()));
+        const auto result = std::make_shared<RepositoryFolder>();
+        Work(wxS("Checking working folder…"), [path, result] {
+            *result = inspect_repository_folder(path);
+        }, [this, id, result] { LinkFolder(id, *result); });
+    }
+
+    void LinkFolder(const std::string& id, const RepositoryFolder& folder) {
+        if (!folder.initialized) {
+            wxMessageDialog prompt(this,
+                W("This folder is not a Skald working copy. Would you like to create one here?\n\n"
+                  + path_utf8(folder.root)),
+                "Create a Skald working copy", wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
+            prompt.SetYesNoLabels("Create and link", "Cancel");
+            if (prompt.ShowModal() != wxID_YES) return;
+        }
         const auto directory = store_.directory();
-        Work(wxS("Checking working folder…"), [directory, id = repo->id, path] {
+        Work(folder.initialized ? wxS("Linking folder…") : wxS("Creating Skald working copy…"), [directory, id, folder] {
             Store store(directory);
-            link_repository_folder(store, id, path);
-        }, [this] { ShowRepository(); });
+            if (!folder.initialized) initialize_repository_folder(folder.root);
+            link_repository_folder(store, id, folder.root);
+        }, [this, folder] { OfferIgnoreRename(folder); });
+    }
+
+    void OfferIgnoreRename(const RepositoryFolder& folder) {
+        if (folder.can_rename_ignore) {
+            wxMessageDialog prompt(this,
+                "This folder has a .gitignore. Rename it to .skaldignore so Skald can use it? "
+                "Git uses the original filename.",
+                "Use these ignore rules in Skald", wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
+            prompt.SetYesNoLabels("Rename", "Keep .gitignore");
+            if (prompt.ShowModal() == wxID_YES) {
+                UpdateWorkingCopy(wxS("Renaming ignore file…"), [root = folder.root] { rename_repository_ignore(root); });
+                return;
+            }
+        }
+        ShowRepository();
     }
 
     void Transfer(RepositoryTransfer transfer) {

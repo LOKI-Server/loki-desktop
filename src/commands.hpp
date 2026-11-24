@@ -45,6 +45,11 @@ struct BranchComparison {
     std::vector<RepositoryDiff> files;
     bool history_limited = false;
 };
+struct RepositoryFolder {
+    std::filesystem::path root;
+    bool initialized = false;
+    bool can_rename_ignore = false;
+};
 HostedRepositories hosted_repositories(Store& store);
 // Reads a GET /api/v1/repos response from any LOKI version.
 HostedRepositories read_hosted_repositories(const nlohmann::json& listing, const std::string& username);
@@ -55,7 +60,10 @@ void clone_hosted_repository(Store& store, const std::string& id, const std::fil
 std::vector<std::string> transfer_repository(Store& store, const std::string& id,
                                              const std::filesystem::path& folder, RepositoryTransfer transfer);
 std::filesystem::path repository_folder(Store& store, const std::string& id);
+RepositoryFolder inspect_repository_folder(const std::filesystem::path& folder);
+void initialize_repository_folder(const std::filesystem::path& folder);
 void link_repository_folder(Store& store, const std::string& id, const std::filesystem::path& folder);
+void rename_repository_ignore(const std::filesystem::path& folder);
 RepositoryStatus repository_status(const std::filesystem::path& folder, const std::string& remote_url = {});
 RepositoryStatus hosted_repository_status(Store& store, const std::string& id, const std::filesystem::path& folder);
 void create_repository_branch(const std::filesystem::path& folder, const std::string& name, const std::string& from = {});

@@ -57,15 +57,23 @@ private:
     char* value_ = nullptr;
 };
 
-fs::path workspace_root(const fs::path& directory) {
-    auto path = fs::canonical(directory);
+fs::path find_workspace_root(fs::path path) {
     while (!path.empty()) {
         if (fs::is_directory(path / ".skald")) return path;
         const auto parent = path.parent_path();
         if (parent == path) break;
         path = parent;
     }
+    return {};
+}
+
+fs::path workspace_root(const fs::path& directory) {
+    if (auto root = find_workspace_root(fs::canonical(directory)); !root.empty()) return root;
     throw std::runtime_error("Choose a Skald working folder containing .skald.");
+}
+
+bool can_rename_ignore(const fs::path& root) {
+    return fs::is_regular_file(root / ".gitignore") && !fs::exists(fs::symlink_status(root / ".skaldignore"));
 }
 
 SkaldHandle open_workspace(const fs::path& directory) {
@@ -356,11 +364,59 @@ fs::path repository_folder(Store& store, const std::string& id) {
     return link.is_object() ? path_from_utf8(link.value("folder", "")) : fs::path{};
 }
 
+RepositoryFolder inspect_repository_folder(const fs::path& folder) {
+#ifdef LOKI_HAS_SKALD
+    const auto path = fs::canonical(folder);
+    if (!fs::is_directory(path)) throw std::runtime_error("Choose a folder to link.");
+    const auto root = find_workspace_root(path);
+    if (root.empty()) return {path, false, can_rename_ignore(path)};
+    open_workspace(root);
+    return {root, true, can_rename_ignore(root)};
+#else
+    skald_unavailable();
+#endif
+}
+
+void initialize_repository_folder(const fs::path& folder) {
+#ifdef LOKI_HAS_SKALD
+    const auto path = fs::canonical(folder);
+    if (!fs::is_directory(path)) throw std::runtime_error("Choose a folder to initialize.");
+    const auto root = find_workspace_root(path);
+    if (root == path) {
+        open_workspace(root);
+        return;
+    }
+    if (!root.empty()) throw std::runtime_error("This folder is now inside a Skald working copy. Choose the folder again to link it.");
+    check_abi();
+    SkaldRepo* handle = nullptr;
+    check_skald(skald_init(path_utf8(path).c_str(), &handle));
+    const SkaldHandle workspace(handle, skald_repo_free);
+#else
+    skald_unavailable();
+#endif
+}
+
 void link_repository_folder(Store& store, const std::string& id, const fs::path& folder) {
 #ifdef LOKI_HAS_SKALD
     const auto root = workspace_root(folder);
     open_workspace(root);
     write_atomically(worktree_link(store, id), json{{"folder", path_utf8(root)}}.dump());
+#else
+    skald_unavailable();
+#endif
+}
+
+void rename_repository_ignore(const fs::path& folder) {
+#ifdef LOKI_HAS_SKALD
+    const auto root = workspace_root(folder);
+    if (root != fs::canonical(folder)) throw std::runtime_error("The Skald working copy moved. Check its folder and try again.");
+    if (!can_rename_ignore(root)) throw std::runtime_error("Rename requires a .gitignore and an unused .skaldignore filename.");
+    // MoveFileW refuses an existing destination, including one created after the check above.
+    if (!MoveFileW((root / ".gitignore").c_str(), (root / ".skaldignore").c_str())) {
+        const std::error_code error(GetLastError(), std::system_category());
+        throw fs::filesystem_error("Cannot rename .gitignore to .skaldignore", root / ".gitignore", root / ".skaldignore",
+                                   error);
+    }
 #else
     skald_unavailable();
 #endif

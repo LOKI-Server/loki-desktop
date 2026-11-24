@@ -26,6 +26,10 @@ shows the current branch and changes and supports committing, fetching, pulling,
 and pushing. Pull merges upstream changes and reports conflicted paths.
 Transfers use short-lived credentials scoped to the selected repository.
 
+When linking a plain local folder, choose **Create and link** to initialize
+a Skald working copy there. If it has a `.gitignore` and no `.skaldignore`,
+Desktop offers to rename the file so Skald can use the rules.
+
 Use the **Branches** picker to select and switch local branches. The **Branch
 actions** menu lets you create, compare, and delete branches. **New branch…**
 starts at the current revision. Switch to the
