@@ -10,6 +10,11 @@
   more files disappear at once, nothing is deleted on the server until you
   choose **Bring missing files back** or **Delete missing files everywhere…**.
   A notification-area message says so when the window is hidden.
+- Remove the **Updates** page and download tracking. File shares are plain
+  file servers again; download a file or folder again to get a newer copy.
+  Folder downloads stay, and records of tracked downloads are deleted (your
+  downloaded files are not touched).
+- **View** now switches pages with Ctrl+1 to Ctrl+3.
 
 ## 0.5.0
 

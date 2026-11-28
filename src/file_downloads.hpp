@@ -5,41 +5,25 @@
 
 namespace loki {
 
+/** Bytes received and expected; returning false cancels. A negative count only asks whether to go on. */
 using DownloadProgress = std::function<bool(std::int64_t, std::int64_t)>;
 
-struct TrackedDownload {
-    std::string id, share, share_name, remote_path;
-    std::filesystem::path destination;
-    DownloadManifest baseline;
-};
-
-enum class DownloadStatus { current, available, missing, disabled, unavailable, check_failed };
-
-struct DownloadCheck {
-    TrackedDownload item;
-    DownloadStatus status;
-    bool can_download = false;
-    std::string error;
-};
-
+/** Downloads shared files and whole folders, verifying every file's SHA-256. */
 class FileDownloads {
 public:
     explicit FileDownloads(Store& store);
 
+    /**
+     * Saves the file, or the folder with everything inside it, at `destination`.
+     * A folder is assembled next to the destination and moved into place only
+     * when complete, so a cancelled or failed download leaves nothing behind.
+     */
     void download(const Share& share, const std::string& path, bool directory,
                   const std::filesystem::path& destination, const DownloadProgress& progress);
-    std::vector<DownloadCheck> check();
-    void update(const std::string& id, const DownloadProgress& progress);
-    void redownload(const std::string& id, const std::filesystem::path& destination, const DownloadProgress& progress);
-    void locate(const std::string& id, const std::filesystem::path& destination);
-    void forget(const std::string& id);
 
 private:
-    void replace(const TrackedDownload& item, const std::filesystem::path& destination,
-                 bool repair, const DownloadProgress& progress);
-
     FilesApi api_;
-    std::filesystem::path registry_, cache_;
+    std::filesystem::path cache_;
 };
 
 } // namespace loki

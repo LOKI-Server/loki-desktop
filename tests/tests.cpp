@@ -184,59 +184,28 @@ static void shared_files(const std::string& server) {
     downloads.download(share, "Game", true, game, active);
     CHECK(fs::is_directory(game / "assets" / "empty"));
     CHECK(read(game / "assets" / "keep.txt") == "unchanged");
-    CHECK(read(game / "old.txt") == "remove");
-    const auto executable = game / "game.exe";
-    const auto before = Sha256::of_file(executable);
-    auto tracked = FileDownloads(account).check().at(0);
-    CHECK(tracked.status == DownloadStatus::current);
-    write(game / "user-save.dat", "my game save");
-    const auto id = tracked.item.id;
-    api.sign_out(); // The fixture publishes a changed game at the same source path.
-    CHECK(downloads.check().at(0).status == DownloadStatus::available);
-    try { downloads.update(id, [](auto, auto) { return false; }); CHECK(false); }
-    catch (const std::runtime_error&) { CHECK(Sha256::of_file(executable) == before); }
-    write(executable, "local customization");
-    try { downloads.update(id, active); CHECK(false); }
-    catch (const std::runtime_error&) { CHECK(read(executable) == "local customization"); }
-    fs::remove(executable);
-    // Restore the original baseline so this update exercises binary patching.
-    const auto baseline = api.download("archive", "baseline", dir, active);
-    fs::copy_file(baseline, executable);
-    CHECK(Sha256::of_file(executable) == before);
-    try { downloads.update(id, active); CHECK(false); }
+    CHECK(Sha256::of_file(game / "game.exe") == api.metadata("archive", "Game/game.exe").sha256);
+    // A folder never lands on top of an existing one.
+    try { downloads.download(share, "Game", true, game, active); CHECK(false); }
+    catch (const std::runtime_error&) { CHECK(read(game / "assets" / "keep.txt") == "unchanged"); }
+    // A cancelled or inconsistent folder download leaves nothing behind.
+    const auto cancelled = dir / "Cancelled";
+    try { downloads.download(share, "Game", true, cancelled, [](auto, auto) { return false; }); CHECK(false); }
+    catch (const std::runtime_error&) { CHECK(!fs::exists(cancelled)); }
+    const auto drifting = dir / "Drift";
+    try { downloads.download(share, "Drift", true, drifting, active); CHECK(false); }
     catch (const std::runtime_error& error) {
-        CHECK(std::string(error.what()).find("changed during the update") != std::string::npos);
-        CHECK(Sha256::of_file(executable) == before && fs::exists(game / "old.txt"));
+        CHECK(std::string(error.what()).find("changed during the download") != std::string::npos);
+        CHECK(!fs::exists(drifting));
     }
-    downloads.update(id, active);
-    CHECK(Sha256::of_file(executable) == api.metadata("archive", "Game/game.exe").sha256);
-    CHECK(!fs::exists(game / "old.txt"));
-    CHECK(read(game / "new.txt") == "added");
-    CHECK(read(game / "user-save.dat") == "my game save");
-    CHECK(downloads.check().at(0).status == DownloadStatus::current);
-
-    const auto moved = dir / "Moved";
-    fs::rename(game, moved);
-    CHECK(downloads.check().at(0).status == DownloadStatus::missing);
-    write(moved / "assets" / "keep.txt", "my local changes");
-    downloads.locate(id, moved);
-    CHECK(downloads.check().at(0).item.destination == moved);
-    downloads.download(share, "Game/new.txt", false, game, active);
-    auto checks = downloads.check();
-    CHECK(checks.size() == 2);
-    for (const auto& check : checks) if (check.item.id != id) downloads.forget(check.item.id);
-    fs::remove_all(moved);
-    CHECK(downloads.check().at(0).can_download);
-    downloads.redownload(id, moved, active);
-    CHECK(read(moved / "new.txt") == "added");
-    downloads.forget(id);
-    CHECK(downloads.check().empty() && fs::exists(moved / "game.exe"));
-
+    for (const auto& entry : fs::directory_iterator(dir)) CHECK(!path_utf8(entry.path().filename()).starts_with(".loki-transfer-"));
+    // Single files download directly, and may replace a file the person chose.
     const auto solo = dir / "solo.txt";
-    downloads.download(share, "Game/new.txt", false, solo, active);
-    CHECK(downloads.check().at(0).item.destination == solo);
-    CHECK(read(solo) == "added");
-    downloads.forget(downloads.check().at(0).item.id);
+    write(solo, "old");
+    downloads.download(share, "Game/assets/keep.txt", false, solo, active);
+    CHECK(read(solo) == "unchanged");
+    try { downloads.download(share, "Game/assets/keep.txt", false, game, active); CHECK(false); }
+    catch (const std::runtime_error&) { CHECK(fs::is_directory(game)); }
 
     const auto original = api.download("archive","日本語 + #.bin",dir,[](auto,auto) { return true; });
     const auto contents = read(original);

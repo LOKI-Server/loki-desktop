@@ -11,7 +11,6 @@
 #include <wx/utils.h>
 #include <wx/wrapsizer.h>
 
-#include "file_downloads.hpp"
 #include "commands.hpp"
 #include "ui.hpp"
 
@@ -158,192 +157,6 @@ protected:
 private:
     std::string session_;
     bool refresh_queued_ = false;
-};
-
-class UpdatesPage : public AsyncPage {
-public:
-    UpdatesPage(wxWindow* parent, Store& store)
-        : AsyncPage(parent, store, "Updates", "Check files and folders downloaded from shares that support updates") {
-        refresh_ = Button(actions_, "Check for updates", [this] { RefreshData(); });
-        list_ = new wxListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
-        for (const auto& [label, width] : std::vector<std::pair<const char*,int>>{
-            {"Download", 190}, {"File server", 140}, {"Status", 150}, {"Location", 260}})
-            list_->AppendColumn(label, wxLIST_FORMAT_LEFT, FromDIP(width));
-        ui::fill_last_column(list_);
-        list_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent&) { Controls(); });
-        list_->Bind(wxEVT_LIST_ITEM_DESELECTED, [this](wxListEvent&) { Controls(); });
-        layout_->Add(list_, 1, wxEXPAND);
-
-        progress_ = new wxGauge(this, wxID_ANY, 1000, wxDefaultPosition, FromDIP(wxSize(-1, 6)));
-        layout_->Add(progress_, 0, wxEXPAND | wxTOP, FromDIP(10));
-        progress_->Hide();
-
-        auto* toolbar = new wxBoxSizer(wxHORIZONTAL);
-        update_ = Button(toolbar, "Update", [this] { Transfer(false); });
-        locate_ = Button(toolbar, "Locate…", [this] { Locate(); });
-        download_ = Button(toolbar, "Redownload…", [this] { Transfer(true); });
-        forget_ = Button(toolbar, "Remove from list", [this] {
-            if (const auto* selected = Selected()) {
-                const auto id = selected->item.id;
-                Job("Removing download from the list…", [id](FileDownloads& files) { files.forget(id); });
-            }
-        });
-        cancel_ = Button(toolbar, "Cancel download", [this] { *cancelled_ = true; cancel_->Disable(); });
-        cancel_->Hide();
-        layout_->Add(toolbar, 0, wxTOP, FromDIP(10));
-        FinishLayout();
-        Controls();
-    }
-
-    ~UpdatesPage() override { *cancelled_ = true; }
-
-    void ShowPage() {
-        Activate();
-        if (store_.signed_in() && !busy_) RefreshData();
-    }
-
-private:
-    const DownloadCheck* Selected() const {
-        const auto row = list_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
-        return row >= 0 && size_t(row) < items_.size() ? &items_[size_t(row)] : nullptr;
-    }
-
-    void Reset() override {
-        *cancelled_ = true;
-        items_.clear();
-        list_->DeleteAllItems();
-    }
-
-    void RefreshData() override {
-        const auto profile = store_.directory();
-        const auto session = store_.token();
-        const auto result = std::make_shared<std::vector<DownloadCheck>>();
-        Work("Checking for updates…", [profile, session, result] {
-            Store store(profile);
-            if (store.token() != session) throw std::runtime_error("The signed-in account changed.");
-            *result = FileDownloads(store).check();
-        }, [this, result] {
-            const auto* selected = Selected();
-            const auto previous = selected ? selected->item.id : "";
-            list_->DeleteAllItems();
-            items_ = std::move(*result);
-            for (size_t i = 0; i < items_.size(); ++i) {
-                const auto& check = items_[i];
-                const auto& item = check.item;
-                const auto row = list_->InsertItem(long(i), W(path_utf8(item.destination.filename())));
-                list_->SetItem(row, 1, W(item.share_name));
-                switch (check.status) {
-                case DownloadStatus::current:      list_->SetItem(row, 2, "Up to date"); break;
-                case DownloadStatus::available:    list_->SetItem(row, 2, "Update available"); break;
-                case DownloadStatus::missing:      list_->SetItem(row, 2, "Missing"); break;
-                case DownloadStatus::disabled:     list_->SetItem(row, 2, "Updates disabled"); break;
-                case DownloadStatus::unavailable:  list_->SetItem(row, 2, "Unavailable"); break;
-                case DownloadStatus::check_failed: list_->SetItem(row, 2, "Check failed"); break;
-                }
-                list_->SetItem(row, 3, W(path_utf8(item.destination)));
-                if (item.id == previous) list_->SetItemState(row, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
-            }
-            if (items_.empty()) status_->Info("Downloads from file servers that support updates will appear here.");
-        });
-    }
-
-    void Controls() override {
-        if (!list_) return;
-        const auto* check = Selected();
-        const bool missing = check && check->status == DownloadStatus::missing;
-        refresh_->Enable(!busy_ && store_.signed_in());
-        list_->Enable(!busy_);
-        update_->Enable(!busy_ && check && check->status == DownloadStatus::available);
-        locate_->Enable(!busy_ && missing);
-        download_->Enable(!busy_ && missing && check->can_download);
-        forget_->Enable(!busy_ && check);
-        if (!busy_ && check && !check->error.empty() && status_->GetLabel().empty()) status_->Error(W(check->error));
-        if (!busy_ && progress_->IsShown()) {
-            progress_->Hide();
-            cancel_->Hide();
-            Layout();
-        }
-    }
-
-    void Job(const wxString& message, std::function<void(FileDownloads&)> job) {
-        const auto profile = store_.directory();
-        const auto session = store_.token();
-        Work(message, [profile, session, job = std::move(job)] {
-            Store store(profile);
-            if (store.token() != session) throw std::runtime_error("The signed-in account changed.");
-            FileDownloads files(store);
-            job(files);
-        }, [this] { RefreshData(); });
-    }
-
-    void Locate() {
-        const auto* check = Selected();
-        if (!check) return;
-        const auto id = check->item.id;
-        wxString path;
-        if (check->item.baseline.directory) {
-            wxDirDialog dialog(this, "Locate the downloaded folder", {}, wxDD_DIR_MUST_EXIST);
-            if (dialog.ShowModal() != wxID_OK) return;
-            path = dialog.GetPath();
-        } else {
-            wxFileDialog dialog(this, "Locate the downloaded file", "", "", "All files (*.*)|*.*", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
-            if (dialog.ShowModal() != wxID_OK) return;
-            path = dialog.GetPath();
-        }
-        Job("Checking the selected location…", [id, destination = path_from_utf8(U(path))](FileDownloads& files) {
-            files.locate(id, destination);
-        });
-    }
-
-    void Transfer(bool repair) {
-        const auto* check = Selected();
-        if (!check || busy_) return;
-        const auto id = check->item.id;
-        auto target = check->item.destination;
-        if (repair) {
-            wxDirDialog dialog(this, "Choose where to redownload", W(path_utf8(target.parent_path())), wxDD_DIR_MUST_EXIST);
-            if (dialog.ShowModal() != wxID_OK) return;
-            target = path_from_utf8(U(dialog.GetPath())) / target.filename();
-        }
-        const auto cancel = cancelled_ = std::make_shared<std::atomic<bool>>(false);
-        const auto alive = alive_;
-        auto* application = wxTheApp;
-        gauge_generation_++;
-        const auto generation = gauge_generation_;
-        progress_->SetValue(0);
-        progress_->Show();
-        cancel_->Enable();
-        cancel_->Show();
-        Layout();
-
-        Job(repair ? "Redownloading…" : "Updating download…",
-            [this, id, target, repair, cancel, alive, application, generation](FileDownloads& files) {
-                auto last = std::chrono::steady_clock::time_point{};
-                const auto report = [&](auto received, auto total) {
-                    if (!*alive || *cancel) return false;
-                    if (received < 0) return true;
-                    const auto now = std::chrono::steady_clock::now();
-                    if (now - last >= std::chrono::milliseconds(125)) {
-                        last = now;
-                        application->CallAfter([this, alive, received, total, generation] {
-                            if (!*alive || generation != gauge_generation_) return;
-                            if (total > 0) progress_->SetValue(int(1000.0 * double(received) / double(total)));
-                            else progress_->Pulse();
-                        });
-                    }
-                    return true;
-                };
-                if (repair) files.redownload(id, target, report);
-                else files.update(id, report);
-            });
-    }
-
-    wxListCtrl* list_ = nullptr;
-    wxButton *refresh_, *update_, *locate_, *download_, *forget_, *cancel_;
-    wxGauge* progress_;
-    std::size_t gauge_generation_ = 0;
-    std::vector<DownloadCheck> items_;
-    std::shared_ptr<std::atomic<bool>> cancelled_ = std::make_shared<std::atomic<bool>>(false);
 };
 
 class RepositoryPage : public AsyncPage {
@@ -1009,8 +822,6 @@ private:
 };
 
 }
-wxPanel* build_updates_page(wxWindow* parent, Store& store) { return new UpdatesPage(parent, store); }
-void activate_updates_page(wxPanel* page) { static_cast<UpdatesPage*>(page)->ShowPage(); }
 wxPanel* build_repository_page(wxWindow* parent, Store& store) { return new RepositoryPage(parent, store); }
 void activate_repository_page(wxPanel* page) { static_cast<RepositoryPage*>(page)->Activate(); }
 bool workspace_page_busy(const wxPanel* page) { return static_cast<const AsyncPage*>(page)->Busy(); }

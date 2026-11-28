@@ -112,7 +112,7 @@ void FilesApi::sign_out() { api_.ok("DELETE", "/auth/v1/device"); }
 std::vector<Share> FilesApi::shares() {
     std::vector<Share> out;
     const auto o = json::parse(api_.ok("GET", "/files/v1/shares"));
-    for (const auto& s : o.at("shares")) out.push_back({s.at("id"),s.at("name"),s.value("supports_updates",false)});
+    for (const auto& s : o.at("shares")) out.push_back({s.at("id"),s.at("name")});
     return out;
 }
 
@@ -151,16 +151,16 @@ std::string FilesApi::scan(const std::string& path, const std::function<bool()>&
     return std::move(response.body);
 }
 
-DownloadManifest FilesApi::manifest(const std::string& share, const std::string& path, bool update,
+DownloadManifest FilesApi::manifest(const std::string& share, const std::string& path,
                                     const std::function<bool()>& active) {
-    const auto body = json::parse(scan(route(share, "manifest", path) + (update ? "&update=true" : ""), active));
+    const auto body = json::parse(scan(route(share, "manifest", path), active));
     DownloadManifest result{body.at("directory"), body.at("revision"), {}};
     if (!valid_file_hash(result.revision) || !body.at("entries").is_array() || body.at("entries").size() > 100000)
         throw std::runtime_error("Invalid download manifest.");
     for (const auto& entry : body.at("entries")) {
         const auto name = entry.at("path").get<std::string>();
-        if (result.directory) safe_download_path(name);
-        else if (!name.empty() || entry.at("directory").get<bool>()) throw std::runtime_error("Invalid file manifest.");
+        if (!result.directory) throw std::runtime_error("Only folders have download manifests.");
+        safe_download_path(name);
         DownloadEntry item{entry.at("directory"), {}};
         if (!item.directory) {
             item.file = {entry.at("size"), entry.at("sha256"),
@@ -171,8 +171,6 @@ DownloadManifest FilesApi::manifest(const std::string& share, const std::string&
         if (!result.entries.emplace(name, std::move(item)).second)
             throw std::runtime_error("Duplicate path in the download manifest.");
     }
-    if (!result.directory && result.entries.size() != 1)
-        throw std::runtime_error("The file manifest is missing the selected file.");
     for (const auto& [name, item] : result.entries) {
         const auto slash = name.rfind('/');
         if (slash == std::string::npos) continue;
@@ -181,102 +179,6 @@ DownloadManifest FilesApi::manifest(const std::string& share, const std::string&
             throw std::runtime_error("The download manifest is missing a parent folder.");
     }
     return result;
-}
-
-std::vector<FileChunk> FilesApi::chunks(const std::string& share, const std::string& path, const FileMetadata& file,
-                                        const std::function<bool()>& active) {
-    std::vector<FileChunk> output;
-    std::int64_t offset = 0;
-    do {
-        const auto body = json::parse(scan(route(share, "chunks", path) + "&sha256=" + file.sha256
-                                          + "&offset=" + std::to_string(offset), active));
-        if (!body.at("chunks").is_array() || body.at("chunks").size() > 4096)
-            throw std::runtime_error("Invalid chunk list.");
-        const auto start = offset;
-        for (const auto& value : body.at("chunks")) {
-            FileChunk chunk{value.at("offset"), value.at("size"), value.at("sha256")};
-            if (chunk.offset != offset || chunk.size <= 0 || chunk.size > 4 * 1024 * 1024 ||
-                chunk.size > file.size - offset || !valid_file_hash(chunk.sha256))
-                throw std::runtime_error("Invalid chunk in the download manifest.");
-            offset += chunk.size;
-            output.push_back(std::move(chunk));
-        }
-        const auto& next = body.at("next_offset");
-        if (next.is_null() && offset == file.size) return output;
-        if (next.is_null() || start == offset || offset >= file.size || next.get<std::int64_t>() != offset)
-            throw std::runtime_error("Invalid chunk page.");
-    } while (true);
-}
-
-std::string FilesApi::range(const std::string& share, const std::string& path, const FileMetadata& file,
-                            std::int64_t offset, std::int64_t size, const std::function<bool()>& active) {
-    if (offset < 0 || size <= 0 || size > 16 * 1024 * 1024 || offset > file.size || size > file.size - offset)
-        throw std::runtime_error("Invalid byte range.");
-    struct Range {
-        std::string body, content_range;
-        size_t size;
-        const std::function<bool()>* active;
-    } transfer{{}, {}, size_t(size), &active};
-    std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
-    if (!curl) throw std::runtime_error("Could not start the download.");
-    const auto end = offset + size - 1;
-    const auto requested = std::to_string(offset) + "-" + std::to_string(end);
-    const auto url = api_.base() + route(share, "file", path);
-    std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(
-        curl_slist_append(nullptr, ("Authorization: Bearer " + token_).c_str()), curl_slist_free_all);
-    if (!headers) throw std::runtime_error("Could not prepare the download.");
-    auto* h = curl.get();
-    curl_easy_setopt(h, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers.get());
-    curl_easy_setopt(h, CURLOPT_RANGE, requested.c_str());
-    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 15L);
-    curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);
-    curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, 90L);
-    curl_easy_setopt(h, CURLOPT_HEADERDATA, &transfer);
-    curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, +[](char* data, size_t size, size_t count, void* opaque) -> size_t {
-        auto& range = *static_cast<Range*>(opaque);
-        const auto length = size * count;
-        try {
-            std::string line(data, length);
-            if (line.starts_with("HTTP/")) range.content_range.clear();
-            const auto colon = line.find(':');
-            if (colon != std::string::npos) {
-                auto key = line.substr(0, colon);
-                for (auto& c : key) c = char(std::tolower(static_cast<unsigned char>(c)));
-                if (key == "content-range") {
-                    const auto first = line.find_first_not_of(" \t", colon + 1);
-                    const auto last = line.find_last_not_of(" \r\n\t");
-                    if (first != std::string::npos) range.content_range = line.substr(first, last - first + 1);
-                }
-            }
-            return length;
-        } catch (...) { return 0; }
-    });
-    curl_easy_setopt(h, CURLOPT_WRITEDATA, &transfer);
-    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, +[](char* data, size_t size, size_t count, void* opaque) -> size_t {
-        auto& range = *static_cast<Range*>(opaque);
-        const auto length = size * count;
-        if (length > range.size - range.body.size()) return 0;
-        try { range.body.append(data, length); }
-        catch (...) { return 0; }
-        return length;
-    });
-    curl_easy_setopt(h, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(h, CURLOPT_XFERINFODATA, &transfer);
-    curl_easy_setopt(h, CURLOPT_XFERINFOFUNCTION, +[](void* opaque, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
-        try { return (*static_cast<Range*>(opaque)->active)() ? 0 : 1; }
-        catch (...) { return 1; }
-    });
-    const auto result = curl_easy_perform(h);
-    long status = 0;
-    curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
-    if (result == CURLE_ABORTED_BY_CALLBACK) throw std::runtime_error("Download cancelled.");
-    if (status >= 400 && result == CURLE_OK) Api::fail({status, transfer.body});
-    const auto expected = "bytes " + std::to_string(offset) + "-" + std::to_string(end) + "/" + std::to_string(file.size);
-    if (result != CURLE_OK || status != 206 || transfer.content_range != expected || transfer.body.size() != size_t(size))
-        throw std::runtime_error("The server returned an incomplete or unexpected range. Check for updates and retry.");
-    return std::move(transfer.body);
 }
 
 ShareListing FilesApi::entries(const std::string& share, const std::string& path, int page) {

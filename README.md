@@ -97,19 +97,13 @@ Downloaded files do not create sync mappings or upload anything to the server.
 **Account settings** opens the server account page, where **Devices** handles
 pairing, renaming, and revocation. Signing out of the app signs out both features.
 
-## Download and update shared files and folders
+## Download shared files and folders
 
 In **Browse files**, select a file or folder and choose **Download**. A
-folder download keeps its subfolders and files together. Downloads from a
-file server with **Support updates** enabled also appear in **Updates**.
-Choose **Check for updates**, then select which item to update. Desktop
-reuses unchanged files and matching parts of large files. It verifies the
-result before replacing your files.
-
-If a download is missing, locate the copy you moved, remove it from the list,
-or redownload it. When server changes conflict with local edits, Desktop
-leaves your files in place and shows where the conflict occurred. Folder
-downloads and tracked updates require an updated LOKI server.
+folder download keeps its subfolders and files together. Every file is checked
+against the server's SHA-256, and a folder is assembled beside the destination
+and moved into place only when complete, so a cancelled download leaves
+nothing behind. Folder downloads require LOKI Server 0.11 or newer.
 
 ## How syncing works
 
