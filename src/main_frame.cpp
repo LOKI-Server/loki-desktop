@@ -14,6 +14,7 @@
 #endif
 
 #include <chrono>
+#include <iterator>
 #include <thread>
 
 #include "engine.hpp"
@@ -74,6 +75,7 @@ enum Command {
     kFirstPage,  // One command per page follows.
 };
 const wxString kPages[] = {"Save sync", "Browse files", "Repositories"};
+constexpr int kPageCount = int(std::size(kPages));
 
 class Tray : public wxTaskBarIcon {
 public:
@@ -185,7 +187,7 @@ void MainFrame::BuildMenus() {
     file->Append(wxID_EXIT, "&Quit\tCtrl+Q");
 
     auto* view = new wxMenu;
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < kPageCount; ++i)
         view->Append(kFirstPage + i, wxString::Format("%s\tCtrl+%d", kPages[i], i + 1));
 
     auto* account = new wxMenu;
@@ -217,12 +219,12 @@ void MainFrame::BuildMenus() {
         auto* menus = GetMenuBar();
         for (const int id : {int(wxID_REFRESH), int(kNewFolder), int(kOpenDashboard), int(kReconnect), int(kSignOut)})
             menus->Enable(id, signed_in);
-        for (int i = 0; i < 4; ++i) menus->Enable(kFirstPage + i, signed_in);
+        for (int i = 0; i < kPageCount; ++i) menus->Enable(kFirstPage + i, signed_in);
     });
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { Refresh(); SyncNow(); }, wxID_REFRESH);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { if (store_.signed_in()) OnNewFolder(); }, kNewFolder);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) { BrowseFiles(); }, kBrowseFiles);
-    Bind(wxEVT_MENU, [this](wxCommandEvent& e) { OpenPage(e.GetId() - kFirstPage); }, kFirstPage, kFirstPage + 3);
+    Bind(wxEVT_MENU, [this](wxCommandEvent& e) { OpenPage(e.GetId() - kFirstPage); }, kFirstPage, kFirstPage + kPageCount - 1);
     Bind(wxEVT_MENU, [this](wxCommandEvent&) {
         if (store_.signed_in()) wxLaunchDefaultBrowser(W(store_.server()));
     }, kOpenDashboard);
@@ -398,7 +400,7 @@ wxPanel* MainFrame::BuildWorkspace(wxWindow* parent) {
 }
 
 void MainFrame::OpenPage(int index) {
-    if (index < 0 || index > 3 || !store_.signed_in()) return;
+    if (index < 0 || index >= kPageCount || !store_.signed_in()) return;
     book_->SetSelection(1);
     pages_->SetSelection(index);
     sidebar_->Select(index);
