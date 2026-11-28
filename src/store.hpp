@@ -30,13 +30,20 @@ private:
 #endif
 };
 
-/** Where a server folder lives on this computer, and how its last sync went. */
+/**
+ * Where a server folder lives on this computer, and how its last sync went.
+ * `held` counts synced files missing here whose deletion waits for the person;
+ * `decision` is what they chose for them ("restore" or "delete"), applied by the
+ * next sync.
+ */
 struct Mapping {
     std::string folder_id;
     std::filesystem::path local;
     std::int64_t last_sync = 0;  // Unix milliseconds
     std::string last_result;
     bool failed = false;
+    int held = 0;
+    std::string decision;
     bool operator==(const Mapping&) const = default;
 };
 
@@ -70,7 +77,9 @@ public:
      */
     bool while_current(const Mapping& mapping, const std::function<void()>& block);
     /** Records a finished sync, unless the folder was stopped or moved meanwhile. */
-    bool record_result(const Mapping& mapping);
+    bool record_result(const Mapping& mapping, const std::string& applied = {});
+    /** Records what the person chose for missing files; the caller then syncs. */
+    void decide(const std::string& folder_id, const std::string& decision);
     void remove_mapping(const std::string& folder_id);
 
     std::filesystem::path index_file(const std::string& folder_id) const;

@@ -128,6 +128,23 @@ steps:
   - Files this computer never synced are *stashed*, so a stale folder never
     replaces newer saves.
 
+### When files go missing
+
+A sync never mistakes a missing or unreadable folder for an empty one. If the
+local folder, or any folder inside it, cannot be read (for example, its drive
+is unplugged), the sync stops before changing anything.
+
+If many synced files disappear at once, LOKI Client does not delete them on the
+server or other devices. This applies when every synced file is gone, when
+more than half the folder (at least five files) is gone, or when 50 or more
+files are gone. The folder shows how many are missing. Select it and choose:
+
+- **Bring missing files back** to download them again.
+- **Delete missing files everywhere…** if you removed them on purpose.
+
+Deleted files stay in the server's history either way. In the LOKI dashboard,
+**Roll back** returns a whole folder to an earlier time.
+
 ## Building
 
 ```bash

@@ -64,6 +64,18 @@ static void hashing() {
     fs::remove_all(dir);
 }
 
+static void deletion_guard() {
+    CHECK(!suspicious_deletion(0, 400));
+    CHECK(!suspicious_deletion(1, 1));
+    CHECK(!suspicious_deletion(1, 3));
+    CHECK(!suspicious_deletion(4, 6));
+    CHECK(!suspicious_deletion(10, 100));
+    CHECK(suspicious_deletion(2, 2));
+    CHECK(suspicious_deletion(312, 312));
+    CHECK(suspicious_deletion(5, 8));
+    CHECK(suspicious_deletion(50, 10000));
+}
+
 static void indexes() {
     auto dir = scratch("index");
     SyncIndex index;
@@ -367,6 +379,33 @@ static void two_devices(const std::string& server, const std::string& user, cons
     // Files still being written wait for the next pass.
     write(home_a / "saves/busy.sav", "writing");
     CHECK(sync_a.sync(*a.mapping(folder.id)).uploaded == 0);
+    age(home_a / "saves/busy.sav");
+    CHECK(sync_a.sync(*a.mapping(folder.id)).uploaded == 1);
+    CHECK(sync_b.sync(*b.mapping(folder.id)).errors.empty());
+
+    // A folder that vanishes, as when its drive is unplugged, changes nothing.
+    fs::rename(home_a / "saves", home_a / "unplugged");
+    const auto unplugged = sync_a.sync(*a.mapping(folder.id));
+    CHECK(unplugged.uploaded == 0 && !unplugged.errors.empty());
+    // An empty folder in its place holds the deletions until the person decides.
+    fs::create_directories(home_a / "saves");
+    const auto emptied = sync_a.sync(*a.mapping(folder.id));
+    CHECK(emptied.uploaded == 0 && emptied.held >= 2);
+    CHECK(a.mapping(folder.id)->held == emptied.held && a.mapping(folder.id)->failed);
+    CHECK(sync_b.sync(*b.mapping(folder.id)).removed == 0);
+    // Bringing them back downloads every missing file again.
+    a.decide(folder.id, restore_missing);
+    const auto restored = sync_a.sync(*a.mapping(folder.id));
+    CHECK(restored.downloaded == emptied.held && restored.held == 0);
+    CHECK(read(home_a / "saves/Emerald.srm") == "badge 5 saved on B mid-sync");
+    CHECK(a.mapping(folder.id)->decision.empty() && a.mapping(folder.id)->held == 0);
+    // Deleting them everywhere is a deliberate choice that goes through.
+    for (const auto& entry : fs::directory_iterator(home_a / "saves")) fs::remove_all(entry.path());
+    CHECK(sync_a.sync(*a.mapping(folder.id)).held >= 2);
+    a.decide(folder.id, delete_missing);
+    const auto confirmed = sync_a.sync(*a.mapping(folder.id));
+    CHECK(confirmed.held == 0 && confirmed.uploaded >= 2);
+    CHECK(sync_b.sync(*b.mapping(folder.id)).removed >= 2);
 
     a.api().sign_out();
     b.api().sign_out();
@@ -628,6 +667,7 @@ int main() try {
     skald_repository_workflows();
 #endif
     hashing();
+    deletion_guard();
     indexes();
     naming();
     file_sessions();

@@ -10,9 +10,22 @@ namespace loki {
 
 struct Outcome {
     int downloaded = 0, uploaded = 0, removed = 0, conflicts = 0;
+    /** Synced files missing here whose deletion waits for the person. */
+    int held = 0;
     std::vector<std::string> errors;
     std::string summary() const;
 };
+
+/** What the person chose for files a sync found missing. */
+inline constexpr const char* restore_missing = "restore";
+inline constexpr const char* delete_missing = "delete";
+
+/**
+ * Whether deleting `deleting` of a folder's `synced` files at once needs the
+ * person's say-so. Losing a whole folder usually means a drive went away, not
+ * that someone deleted every save.
+ */
+bool suspicious_deletion(int deleting, int synced);
 
 /**
  * Two-way sync of one server folder with one local directory.

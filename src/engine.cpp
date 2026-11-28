@@ -42,13 +42,21 @@ struct LocalFile {
     std::int64_t mtime;
 };
 
+/**
+ * Every regular file under `root`. Any directory that cannot be read stops the
+ * sync: a folder read only in part would look like deleted files.
+ */
 std::map<std::string, LocalFile> scan(const fs::path& root) {
     std::map<std::string, LocalFile> files;
     std::error_code error;
-    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, error), end;
-    if (error) throw std::runtime_error("Cannot open " + root.string() + ": " + error.message());
+    const auto unreadable = [&] {
+        return std::runtime_error("Cannot read " + root.string() + " (" + error.message() +
+                                  "). Nothing was synced or deleted.");
+    };
+    fs::recursive_directory_iterator it(root, fs::directory_options::none, error), end;
+    if (error) throw unreadable();
     for (; it != end; it.increment(error)) {
-        if (error) break;
+        if (error) throw unreadable();
         const auto& entry = *it;
         const auto name = logical(entry.path().filename());
         if (ignored(name)) {
@@ -131,8 +139,16 @@ bool ignored(const std::string& name) {
     return name.rfind(".loki", 0) == 0 || name == "desktop.ini" || name == ".DS_Store" || name == "Thumbs.db";
 }
 
+bool suspicious_deletion(int deleting, int synced) {
+    if (deleting <= 0) return false;
+    if (deleting >= 50) return true;                     // Many files at once.
+    if (synced >= 2 && deleting >= synced) return true;  // Every synced file is gone.
+    return deleting >= 5 && deleting * 2 > synced;       // Most of the folder is gone.
+}
+
 std::string Outcome::summary() const {
     std::vector<std::string> parts;
+    if (held) parts.push_back(std::to_string(held) + " missing here; not deleted anywhere until you choose");
     if (downloaded) parts.push_back(std::to_string(downloaded) + " received");
     if (uploaded) parts.push_back(std::to_string(uploaded) + " sent");
     if (removed) parts.push_back(std::to_string(removed) + " removed");
@@ -162,7 +178,8 @@ Outcome Engine::sync(const Mapping& mapping) {
     try {
         outcome = sync_folder(mapping);
         recorded.last_result = outcome.summary();
-        recorded.failed = !outcome.errors.empty();
+        recorded.failed = !outcome.errors.empty() || outcome.held > 0;
+        recorded.held = outcome.held;
     } catch (const ApiError& e) {
         recorded.last_result = e.code == "unknown_folder" ? "This folder was deleted on the server."
                                : e.code == "unauthorized" ? "This computer was signed out. Pair it again."
@@ -176,14 +193,17 @@ Outcome Engine::sync(const Mapping& mapping) {
     }
     recorded.last_sync = now_ms();
     // The person may have stopped syncing this folder, or moved it, meanwhile.
-    store_.record_result(recorded);
+    store_.record_result(recorded, mapping.decision);
     return outcome;
 }
 
 Outcome Engine::sync_folder(const Mapping& mapping) {
     auto api = store_.api();
     const auto root = mapping.local;
-    if (!fs::is_directory(root)) throw std::runtime_error("The local folder " + root.string() + " is missing.");
+    if (!fs::is_directory(root)) {
+        throw std::runtime_error("The local folder " + root.string() +
+                                 " is missing. If it is on a removable drive, connect it. Nothing was synced or deleted.");
+    }
     std::int64_t max_file = INT64_MAX;
     try {
         max_file = api.quota().max_file_bytes;
@@ -220,10 +240,18 @@ Outcome Engine::sync_folder(const Mapping& mapping) {
             dirty.insert(path);
         }
     }
+    if (mapping.decision == restore_missing) {
+        // Forget the missing files so the full feed brings them back here.
+        std::erase_if(index.entries, [&](const auto& item) { return item.second.hash && !local.contains(item.first); });
+        index.cursor = 0;
+    }
     std::set<std::string> deleted;
+    int synced = 0;
     for (const auto& [path, e] : index.entries) {
+        if (e.hash) ++synced;
         if (e.hash && !local.contains(path)) deleted.insert(path);
     }
+    const bool hold = mapping.decision != delete_missing && suspicious_deletion(int(deleted.size()), synced);
 
     // 2. Pull.
     auto since = index.cursor;
@@ -293,7 +321,9 @@ Outcome Engine::sync_folder(const Mapping& mapping) {
                            file->second.mtime / 1000};
         (known != index.entries.end() && known->second.hash ? overwrite : stash).push_back(change);
     }
-    for (const auto& path : deleted) deletes.push_back({path, index.entries.at(path).version, std::nullopt, 0, now / 1000});
+    // Too many files gone at once: keep them on the server until the person decides.
+    if (hold) run.outcome.held = int(deleted.size());
+    else for (const auto& path : deleted) deletes.push_back({path, index.entries.at(path).version, std::nullopt, 0, now / 1000});
 
     const std::pair<std::vector<LocalChange>*, const char*> groups[] = {
         {&overwrite, "overwrite"}, {&stash, "stash"}, {&deletes, "reject"}};

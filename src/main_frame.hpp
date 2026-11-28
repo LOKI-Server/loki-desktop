@@ -82,6 +82,8 @@ private:
     void UpdateFolderButtons();
     void OnChooseLocal();
     void OnStop();
+    /** Applies a choice ("restore" or "delete") for files a sync found missing. */
+    void OnMissing(const char* decision);
     void OnNewFolder();
     void OnSignOut();
 
@@ -127,6 +129,8 @@ private:
     wxListCtrl* list_ = nullptr;
     wxButton* choose_local_ = nullptr;
     wxButton* stop_ = nullptr;
+    wxButton* restore_missing_ = nullptr;
+    wxButton* delete_missing_ = nullptr;
     ui::Status* status_ = nullptr;
     std::vector<Folder> folders_;
 };

@@ -204,7 +204,8 @@ void Store::load() const {
     if (o.contains("mappings")) {
         for (const auto& [id, m] : o["mappings"].items()) {
             mappings_[id] = {id, path_from_utf8(m.value("path", "")), m.value("last_sync", std::int64_t(0)),
-                             m.value("last_result", ""), m.value("failed", false)};
+                             m.value("last_result", ""), m.value("failed", false), m.value("held", 0),
+                             m.value("decision", "")};
         }
     }
 }
@@ -215,7 +216,9 @@ void Store::save() const {
         mappings[id] = {{"path", path_utf8(m.local)},
                         {"last_sync", m.last_sync},
                         {"last_result", m.last_result},
-                        {"failed", m.failed}};
+                        {"failed", m.failed},
+                        {"held", m.held},
+                        {"decision", m.decision}};
     }
     json o{{"profile", "desktop"},
            {"server", server_},
@@ -364,15 +367,28 @@ bool Store::while_current(const Mapping& mapping, const std::function<void()>& b
     return true;
 }
 
-bool Store::record_result(const Mapping& mapping) {
+bool Store::record_result(const Mapping& mapping, const std::string& applied) {
     std::lock_guard lock(mutex_);
     ProfileLock transaction(directory_ / "profile.lock");
     load();
     const auto it = mappings_.find(mapping.folder_id);
     if (it == mappings_.end() || it->second.local != mapping.local) return false;
+    // A choice made while this sync ran is kept for the next one.
+    const auto stored = it->second.decision;
     it->second = mapping;
+    it->second.decision = stored == applied ? std::string() : stored;
     save();
     return true;
+}
+
+void Store::decide(const std::string& folder_id, const std::string& decision) {
+    std::lock_guard lock(mutex_);
+    ProfileLock transaction(directory_ / "profile.lock");
+    load();
+    const auto it = mappings_.find(folder_id);
+    if (it == mappings_.end()) return;
+    it->second.decision = decision;
+    save();
 }
 
 void Store::remove_mapping(const std::string& folder_id) {

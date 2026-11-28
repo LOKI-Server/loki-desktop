@@ -744,6 +744,9 @@ wxPanel* MainFrame::BuildFolders(wxWindow* parent) {
     auto* buttons = new wxBoxSizer(wxHORIZONTAL);
     choose_local_ = ui::button(page, buttons, wxS("Choose local folder…"), [this] { OnChooseLocal(); });
     stop_ = ui::button(page, buttons, "Stop syncing here", [this] { OnStop(); });
+    // Shown when a sync held back deleting files that went missing here.
+    restore_missing_ = ui::button(page, buttons, "Bring missing files back", [this] { OnMissing(restore_missing); });
+    delete_missing_ = ui::button(page, buttons, wxS("Delete missing files everywhere…"), [this] { OnMissing(delete_missing); });
     column->Add(buttons, 0, wxTOP, FromDIP(10));
 
     status_ = new ui::Status(page);
@@ -819,10 +822,14 @@ void MainFrame::Populate() {
 
 void MainFrame::UpdateFolderButtons() {
     const auto id = SelectedFolder();
-    const bool mapped = id && store_.mapping(*id);
+    const auto mapping = id ? store_.mapping(*id) : std::nullopt;
+    const bool mapped = mapping.has_value();
     choose_local_->Enable(id.has_value());
     choose_local_->SetLabel(mapped ? wxS("Change local folder…") : wxS("Choose local folder…"));
     stop_->Enable(mapped);
+    const bool held = mapped && mapping->held > 0;
+    restore_missing_->Show(held);
+    delete_missing_->Show(held);
     choose_local_->GetParent()->Layout();
 }
 
@@ -863,6 +870,22 @@ void MainFrame::OnStop() {
         WatchFolders();
         Populate();
     }
+}
+
+void MainFrame::OnMissing(const char* decision) {
+    const auto id = SelectedFolder();
+    const auto mapping = id ? store_.mapping(*id) : std::nullopt;
+    if (!mapping || mapping->held == 0) return;
+    if (std::string_view(decision) == delete_missing &&
+        wxMessageBox(wxString::Format(wxS("Delete %d missing files on every device? The server keeps them in this "
+                                          "folder's history, where you can restore them or roll the folder back "
+                                          "from the LOKI dashboard."),
+                                      mapping->held),
+                     "Delete everywhere", wxYES_NO | wxNO_DEFAULT | wxICON_WARNING, this) != wxYES) {
+        return;
+    }
+    store_.decide(*id, decision);
+    SyncNow();
 }
 
 void MainFrame::OnNewFolder() {
@@ -917,9 +940,20 @@ void MainFrame::SyncNow() {
                },
                [this, outcomes](std::optional<std::string> error) {
                    syncing_ = false;
-                   int failed = 0;
-                   for (const auto& [id, outcome] : *outcomes) failed += outcome.errors.empty() ? 0 : 1;
+                   int failed = 0, held = 0;
+                   for (const auto& [id, outcome] : *outcomes) {
+                       failed += outcome.errors.empty() ? 0 : 1;
+                       held += outcome.held;
+                   }
                    if (error) status_->Error(W(*error));
+                   else if (held) {
+                       const auto text = wxString::Format(
+                           wxS("%d synced files are missing on this computer. Nothing was deleted on the server; select "
+                               "the folder to bring them back or delete them everywhere."),
+                           held);
+                       status_->Error(text);
+                       if (tray_ && !IsShown()) tray_->ShowBalloon("Files missing from a synced folder", text);
+                   }
                    else if (failed)
                        status_->Error(wxString::Format(failed == 1 ? wxS("Synced at %s. 1 folder needs attention.")
                                                                    : wxS("Synced at %s. %d folders need attention."),

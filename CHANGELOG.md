@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0
+
+- Never treat a missing or unreadable local folder as empty. If the folder or
+  any folder inside it cannot be read, as when its drive is unplugged, the sync
+  stops before changing anything. Earlier versions skipped unreadable folders,
+  so their files could be deleted everywhere.
+- Hold back mass deletions. When every synced file, most of a folder, or 50 or
+  more files disappear at once, nothing is deleted on the server until you
+  choose **Bring missing files back** or **Delete missing files everywhere…**.
+  A notification-area message says so when the window is hidden.
+
 ## 0.5.0
 
 - Download whole folders from the file browser.
